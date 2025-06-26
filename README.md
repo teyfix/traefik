@@ -9,9 +9,11 @@ This project sets up a local HTTPS environment using:
 - Zero DNS configuration thanks to [sslip.io](https://sslip.io/)
   - This allows you to access services like `https://traefik.127-0-0-1.nip.io` without any DNS configuration.
 
+![Traefik HTTP Routers](images/00-https-routers.png)
+
 ## Table of Contents
 
-- [�️ Local Dev with Traefik + Step CA + ACME TLS](#️-local-dev-with-traefik--step-ca--acme-tls)
+- [🛡️ Local Dev with Traefik + Step CA + ACME TLS](#️-local-dev-with-traefik--step-ca--acme-tls)
   - [Table of Contents](#table-of-contents)
   - [🔧 Project Structure](#-project-structure)
   - [🚀 Quick Start](#-quick-start)
@@ -29,6 +31,13 @@ This project sets up a local HTTPS environment using:
   - [🛡 Security Notes](#-security-notes)
   - [🧼 Cleanup](#-cleanup)
   - [📦 Requirements](#-requirements)
+  - [Screenshots](#screenshots)
+    - [Traefik HTTP Routers](#traefik-http-routers)
+    - [Traefik TCP Routers](#traefik-tcp-routers)
+    - [Services](#services)
+      - [KeyCloak Dashboard](#keycloak-dashboard)
+      - [RedPanda Console](#redpanda-console)
+      - [Dozzle](#dozzle)
 
 ## 🔧 Project Structure
 
@@ -270,3 +279,27 @@ This will stop and remove everything, including volumes and orphan containers.
 - [Docker](https://www.docker.com/)
 - [Task](https://taskfile.dev)
 - Linux or WSL (for root CA trust automation)
+
+## Screenshots
+
+### Traefik HTTP Routers
+
+![Traefik HTTP Routers](images/00-https-routers.png)
+
+### Traefik TCP Routers
+
+![Traefik TCP Routers](images/01-tcp-routers.png)
+
+### Services
+
+#### KeyCloak Dashboard
+
+![KeyCloak Dashboard](images/02-keycloak.png)
+
+#### RedPanda Console
+
+![RedPanda Console](images/03-redpanda-console.png)
+
+#### Dozzle
+
+![Dozzle](images/04-dozzle.png)
