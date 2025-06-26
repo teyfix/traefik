@@ -1,0 +1,35 @@
+log:
+  level: DEBUG
+
+api:
+  insecure: true
+  dashboard: true
+
+entryPoints:
+  web:
+    address: :80
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    http:
+      tls:
+        certResolver: stepca
+    address: :443
+  shared:
+    address: :4040
+
+providers:
+  docker:
+    exposedbydefault: false
+
+certificatesResolvers:
+  stepca:
+    acme:
+      email: "dev@example.com"
+      storage: "/acme/stepca/acme.json"
+      caServer: "https://host.docker.internal:9000/acme/acme/directory"
+      httpChallenge:
+        entryPoint: web

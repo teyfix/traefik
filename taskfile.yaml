@@ -1,0 +1,22 @@
+version: 3
+tasks:
+  up: docker compose up -d --force-recreate --remove-orphans {{.CLI_ARGS}}
+  down: docker compose down --remove-orphans --volumes {{.CLI_ARGS}}
+  logs: docker compose logs --follow --tail 0 {{.CLI_ARGS}}
+  recreate:
+    cmds:
+      - task: down
+      - task: up
+  certs:
+    desc: Copies certs from container to host
+    cmds:
+      - docker compose exec stepca sh -c "mkdir -p /tmp/exported && cp /home/step/certs/*.crt /tmp/exported"
+      - mkdir -p certs
+      - docker compose cp stepca:/tmp/exported/. ./certs
+  certs:install:
+    desc: Installs root_ca.crt to system trust store (Linux)
+    cmds:
+      - sudo cp certs/root_ca.crt /usr/local/share/ca-certificates/traefik-stepca-root-ca.crt
+      - sudo update-ca-certificates
+    deps:
+      - certs

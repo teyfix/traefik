@@ -1,0 +1,66 @@
+networks:
+  proxy:
+    name: traefik_proxy
+    driver: bridge
+
+volumes:
+  step:
+  acme:
+
+services:
+  stepca:
+    container_name: traefik_stepca
+    image: smallstep/step-ca:latest
+    environment:
+      - DOCKER_STEPCA_INIT_NAME
+      - DOCKER_STEPCA_INIT_DNS_NAMES
+      - DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT
+      - DOCKER_STEPCA_INIT_ACME
+    volumes:
+      - step:/home/step
+    network_mode: host
+    healthcheck:
+      test: [CMD, curl, -fk, https://localhost:9000/health]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  traefik:
+    container_name: traefik
+    image: traefik:v3.4.1
+    command: --configFile=/etc/traefik/traefik-static.yaml
+    restart: unless-stopped
+    networks:
+      - proxy
+    ports:
+      # HTTP web entrypoint for dashboards, web apps, etc.
+      - 80:80
+      # HTTPS web entrypoint for dashboards, web apps, etc.
+      - 443:443
+      # Traefik dashboard
+      - 8080:8080
+      # Shared TCP entrypoint for services
+      - 4040:4040
+    labels:
+      - "traefik.enable=true"
+
+      # Traefik self router
+      - "traefik.http.routers.traefik_self.rule=Host(`traefik.127-0-0-1.nip.io`)"
+      - "traefik.http.routers.traefik_self.tls=true"
+      - "traefik.http.routers.traefik_self.entrypoints=websecure"
+      - "traefik.http.routers.traefik_self.service=traefik_self"
+      - "traefik.http.routers.traefik_self.tls.certresolver=stepca"
+      - "traefik.http.services.traefik_self.loadbalancer.server.port=8080"
+    volumes:
+      - step:/home/step
+      - acme:/acme
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${PWD}/traefik/traefik-static.yaml:/etc/traefik/traefik-static.yaml:ro
+    environment:
+      - LEGO_CA_CERTIFICATES=/home/step/certs/root_ca.crt
+    depends_on:
+      stepca:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
