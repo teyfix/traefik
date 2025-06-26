@@ -21,10 +21,11 @@ services:
     network_mode: host
     healthcheck:
       test: [CMD, curl, -fk, https://localhost:9000/health]
-      interval: 5s
+      interval: 30s
       timeout: 5s
       retries: 15
       start_period: 5s
+      start_interval: 5s
 
   traefik:
     container_name: traefik
@@ -64,3 +65,10 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://localhost:8080/ping]
+      interval: 30s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+      start_interval: 5s
