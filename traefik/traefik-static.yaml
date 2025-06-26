@@ -29,7 +29,7 @@ certificatesResolvers:
   stepca:
     acme:
       email: "dev@example.com"
-      storage: "/acme/stepca/acme.json"
+      storage: "/acme/acme.json"
       caServer: "https://host.docker.internal:9000/acme/acme/directory"
       httpChallenge:
         entryPoint: web
