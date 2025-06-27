@@ -91,7 +91,10 @@ This will:
 - Copy `root_ca.crt` from the Step CA container
 - Install it to your system trust store via `update-ca-certificates`
 
-> ✅ Works for WSL, Debian, Ubuntu, etc.
+✅ Works for WSL, Debian, Ubuntu, etc.
+
+> [!TIP]
+> You can use `/usr/local/share/ca-certificates/traefik-stepca-root-ca.crt` as the root certificate for apps that does not use the system trust store.
 
 ### 4. Trust the Root CA (Windows)
 
