@@ -25,7 +25,8 @@ entryPoints:
 
 providers:
   docker:
-    exposedbydefault: false
+    network: traefik_proxy
+    exposedByDefault: false
 
 certificatesResolvers:
   stepca:

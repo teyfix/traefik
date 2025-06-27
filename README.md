@@ -122,9 +122,6 @@ Then follow these steps to install the certificate:
 
 You can run services like PostgreSQL behind Traefik using TCP with TLS termination:
 
-> [!WARNING]
-> If the service you expose through Traefik is attached to multiple Docker networks, Traefik may randomly fail to connect to it. To avoid this, try limiting the service to only the network Traefik uses (e.g., traefik_proxy).
-
 ```yaml
 networks:
   traefik_proxy:
