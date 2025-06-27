@@ -32,8 +32,10 @@ This project sets up a local HTTPS environment using:
   - [🧼 Cleanup](#-cleanup)
   - [📦 Requirements](#-requirements)
   - [Screenshots](#screenshots)
-    - [Traefik HTTP Routers](#traefik-http-routers)
-    - [Traefik TCP Routers](#traefik-tcp-routers)
+    - [Traefik](#traefik)
+      - [Dashboard](#dashboard)
+      - [HTTP Routers](#http-routers)
+      - [TCP Routers](#tcp-routers)
     - [Services](#services)
       - [KeyCloak Dashboard](#keycloak-dashboard)
       - [RedPanda Console](#redpanda-console)
@@ -146,8 +148,7 @@ You can now securely connect to PostgreSQL at `pg.teyfix.127-0-0-1.nip.io:4040` 
 > [!NOTE]
 > Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's configuration, which is designed for non-HTTP services like databases.
 
-> [!TIP]
-> `nip.io` is used here for convenience — it’s a wildcard DNS service similar to `sslip.io`. The main difference is that `nip.io` uses a shorter TLD.
+> [!TIP] > `nip.io` is used here for convenience — it’s a wildcard DNS service similar to `sslip.io`. The main difference is that `nip.io` uses a shorter TLD.
 
 ## 🌐 Example: HTTP Service (MinIO) Behind Traefik
 
@@ -164,7 +165,7 @@ services:
     image: minio/minio:latest
     environment:
       # Prevents redirecting to the console when accessing the API directly
-      - MINIO_BROWSER_REDIRECT=false 
+      - MINIO_BROWSER_REDIRECT=false
     expose:
       - 9000 # API
       - 9001 # Console
@@ -282,11 +283,17 @@ This will stop and remove everything, including volumes and orphan containers.
 
 ## Screenshots
 
-### Traefik HTTP Routers
+### Traefik
+
+#### Dashboard
+
+![Traefik Dashboard](images/05-traefik-dashboard.png)
+
+#### HTTP Routers
 
 ![Traefik HTTP Routers](images/00-https-routers.png)
 
-### Traefik TCP Routers
+#### TCP Routers
 
 ![Traefik TCP Routers](images/01-tcp-routers.png)
 
