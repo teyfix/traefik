@@ -11,6 +11,7 @@ services:
   stepca:
     container_name: traefik_stepca
     image: smallstep/step-ca:latest
+    restart: unless-stopped
     environment:
       - DOCKER_STEPCA_INIT_NAME
       - DOCKER_STEPCA_INIT_DNS_NAMES
