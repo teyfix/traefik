@@ -73,3 +73,27 @@ services:
       retries: 15
       start_period: 5s
       start_interval: 5s
+
+  dozzle:
+    container_name: traefik_dozzle
+    image: amir20/dozzle:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - 8080
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik_dozzle.rule=Host(`dozzle.traefik.127-0-0-1.nip.io`)"
+      - "traefik.http.routers.traefik_dozzle.tls=true"
+      - "traefik.http.routers.traefik_dozzle.entrypoints=websecure"
+      - "traefik.http.routers.traefik_dozzle.tls.certresolver=stepca"
+      - "traefik.http.routers.traefik_dozzle.service=traefik_dozzle"
+      - "traefik.http.services.traefik_dozzle.loadbalancer.server.port=8080"
+    healthcheck:
+      test: ["CMD", "/dozzle", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
