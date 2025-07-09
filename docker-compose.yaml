@@ -1,3 +1,10 @@
+x-healthcheck: &healthcheck
+  interval: 30s
+  timeout: 5s
+  retries: 15
+  start_period: 3s
+  start_interval: 1s
+
 networks:
   proxy:
     name: traefik_proxy
@@ -21,12 +28,8 @@ services:
       - step:/home/step
     network_mode: host
     healthcheck:
-      test: [CMD, curl, -fk, https://localhost:9000/health]
-      interval: 30s
-      timeout: 5s
-      retries: 15
-      start_period: 5s
-      start_interval: 5s
+      <<: *healthcheck
+      test: [CMD-SHELL, "curl -fk https://localhost:9000/health"]
 
   traefik:
     container_name: traefik
@@ -67,12 +70,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: [CMD, wget, -q, --spider, http://localhost:8080/ping]
-      interval: 30s
-      timeout: 5s
-      retries: 15
-      start_period: 5s
-      start_interval: 5s
+      <<: *healthcheck
+      test: [CMD-SHELL, "wget -q --spider http://localhost:8080/ping"]
 
   dozzle:
     container_name: traefik_dozzle
@@ -93,8 +92,5 @@ services:
       - "traefik.http.routers.traefik_dozzle.service=traefik_dozzle"
       - "traefik.http.services.traefik_dozzle.loadbalancer.server.port=8080"
     healthcheck:
-      test: ["CMD", "/dozzle", "healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+      <<: *healthcheck
+      test: [CMD-SHELL, "/dozzle healthcheck"]
