@@ -7,7 +7,7 @@ This project sets up a local HTTPS environment using:
 - Automatic trust installation for `root_ca.crt`
 - Taskfile automation (`task`) for convenience
 - Zero DNS configuration thanks to [sslip.io](https://sslip.io/)
-  - This allows you to access services like `https://traefik.127-0-0-1.nip.io` without any DNS configuration.
+  - This allows you to access services like `https://traefik.127-0-0-1.sslip.io` without any DNS configuration.
 
 ![Traefik HTTP Routers](images/00-https-routers.png)
 
@@ -116,7 +116,7 @@ Then follow these steps to install the certificate:
 7. Click **Next**, then **Finish**.
 8. A final prompt will confirm the installation — click **Yes**.
 
-> 🛡️ You should now be able to visit services like `https://traefik.127-0-0-1.nip.io` in your browser without any certificate warnings.
+> 🛡️ You should now be able to visit services like `https://traefik.127-0-0-1.sslip.io` in your browser without any certificate warnings.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
@@ -133,7 +133,7 @@ services:
     image: teyfix/timescaledb-pgrx:latest
     labels:
       - "traefik.enable=true"
-      - "traefik.tcp.routers.teyfix_pg.rule=HostSNI(`pg.teyfix.127-0-0-1.nip.io`)"
+      - "traefik.tcp.routers.teyfix_pg.rule=HostSNI(`pg.teyfix.127-0-0-1.sslip.io`)"
       - "traefik.tcp.routers.teyfix_pg.entrypoints=shared"
       - "traefik.tcp.routers.teyfix_pg.service=teyfix_pg"
       - "traefik.tcp.routers.teyfix_pg.tls=true"
@@ -143,12 +143,10 @@ services:
       - traefik_proxy
 ```
 
-You can now securely connect to PostgreSQL at `pg.teyfix.127-0-0-1.nip.io:4040` with TLS.
+You can now securely connect to PostgreSQL at `pg.teyfix.127-0-0-1.sslip.io:4040` with TLS.
 
 > [!NOTE]
 > Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's configuration, which is designed for non-HTTP services like databases.
-
-> [!TIP] > `nip.io` is used here for convenience — it’s a wildcard DNS service similar to `sslip.io`. The main difference is that `nip.io` uses a shorter TLD.
 
 ## 🌐 Example: HTTP Service (MinIO) Behind Traefik
 
@@ -175,7 +173,7 @@ services:
       - "traefik.enable=true"
 
       # MinIO API
-      - "traefik.http.routers.teyfix_minio_api.rule=Host(`minio-api.teyfix.127-0-0-1.nip.io`)"
+      - "traefik.http.routers.teyfix_minio_api.rule=Host(`minio-api.teyfix.127-0-0-1.sslip.io`)"
       - "traefik.http.routers.teyfix_minio_api.tls=true"
       - "traefik.http.routers.teyfix_minio_api.entrypoints=websecure"
       - "traefik.http.routers.teyfix_minio_api.tls.certresolver=stepca"
@@ -183,7 +181,7 @@ services:
       - "traefik.http.services.teyfix_minio_api.loadbalancer.server.port=9000"
 
       # MinIO Console
-      - "traefik.http.routers.teyfix_minio_console.rule=Host(`minio-console.teyfix.127-0-0-1.nip.io`)"
+      - "traefik.http.routers.teyfix_minio_console.rule=Host(`minio-console.teyfix.127-0-0-1.sslip.io`)"
       - "traefik.http.routers.teyfix_minio_console.tls=true"
       - "traefik.http.routers.teyfix_minio_console.entrypoints=websecure"
       - "traefik.http.routers.teyfix_minio_console.tls.certresolver=stepca"
@@ -193,8 +191,8 @@ services:
 
 ✅ Once running, you can securely access:
 
-- `https://minio-api.teyfix.127-0-0-1.nip.io` for the API
-- `https://minio-console.teyfix.127-0-0-1.nip.io` for the web console
+- `https://minio-api.teyfix.127-0-0-1.sslip.io` for the API
+- `https://minio-console.teyfix.127-0-0-1.sslip.io` for the web console
 
 ---
 
@@ -215,7 +213,7 @@ services:
 
 Once up, you can access the Traefik dashboard via either:
 
-- **HTTPS (recommended)**: `https://traefik.127-0-0-1.nip.io`
+- **HTTPS (recommended)**: `https://traefik.127-0-0-1.sslip.io`
 - **HTTP (insecure)**: `http://localhost:8080`
 
 > [!TIP]

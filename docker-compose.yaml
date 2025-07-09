@@ -48,7 +48,7 @@ services:
       - "traefik.enable=true"
 
       # Traefik self router
-      - "traefik.http.routers.traefik_self.rule=Host(`traefik.127-0-0-1.nip.io`)"
+      - "traefik.http.routers.traefik_self.rule=Host(`traefik.127-0-0-1.sslip.io`)"
       - "traefik.http.routers.traefik_self.tls=true"
       - "traefik.http.routers.traefik_self.entrypoints=websecure"
       - "traefik.http.routers.traefik_self.service=traefik_self"
@@ -86,7 +86,7 @@ services:
       - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik_dozzle.rule=Host(`dozzle.traefik.127-0-0-1.nip.io`)"
+      - "traefik.http.routers.traefik_dozzle.rule=Host(`dozzle.traefik.127-0-0-1.sslip.io`)"
       - "traefik.http.routers.traefik_dozzle.tls=true"
       - "traefik.http.routers.traefik_dozzle.entrypoints=websecure"
       - "traefik.http.routers.traefik_dozzle.tls.certresolver=stepca"
