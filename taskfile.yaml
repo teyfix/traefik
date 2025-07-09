@@ -19,7 +19,7 @@ tasks:
       cert_path: /usr/local/share/ca-certificates/traefik-stepca-root-ca.crt
     cmds:
       - sudo cp certs/root_ca.crt {{.cert_path}}
-      - sudo chmod 644 {{.cert_path}}
       - sudo update-ca-certificates
+      - sudo chmod 644 {{.cert_path}}
     deps:
       - certs
