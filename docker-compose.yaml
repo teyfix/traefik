@@ -76,6 +76,7 @@ services:
   dozzle:
     container_name: traefik_dozzle
     image: amir20/dozzle:latest
+    command: --enable-shell
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
