@@ -48,15 +48,18 @@ services:
       # Shared TCP entrypoint for services
       - 4040:4040
     labels:
+      # Enable Traefik discovery for this container
       - "traefik.enable=true"
 
-      # Traefik self router
-      - "traefik.http.routers.traefik_self.rule=Host(`traefik.127-0-0-1.sslip.io`)"
-      - "traefik.http.routers.traefik_self.tls=true"
-      - "traefik.http.routers.traefik_self.entrypoints=websecure"
-      - "traefik.http.routers.traefik_self.service=traefik_self"
-      - "traefik.http.routers.traefik_self.tls.certresolver=stepca"
-      - "traefik.http.services.traefik_self.loadbalancer.server.port=8080"
+      # Create a Traefik service on port 8080 for the container
+      - "traefik.http.services.${TRAEFIK_PREFIX}_self.loadBalancer.server.port=8080"
+
+      # Expose the service with a Traefik router
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_self.rule=Host(`${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_self.tls=true"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_self.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT}"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_self.tls.certResolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_self.service=${TRAEFIK_PREFIX}_self"
     volumes:
       - step:/home/step
       - acme:/acme
@@ -85,13 +88,18 @@ services:
     networks:
       - proxy
     labels:
+      # Enable Traefik discovery for this container
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik_dozzle.rule=Host(`dozzle.traefik.127-0-0-1.sslip.io`)"
-      - "traefik.http.routers.traefik_dozzle.tls=true"
-      - "traefik.http.routers.traefik_dozzle.entrypoints=websecure"
-      - "traefik.http.routers.traefik_dozzle.tls.certresolver=stepca"
-      - "traefik.http.routers.traefik_dozzle.service=traefik_dozzle"
-      - "traefik.http.services.traefik_dozzle.loadbalancer.server.port=8080"
+
+      # Create a Traefik service on port 8080 for the container
+      - "traefik.http.services.${TRAEFIK_PREFIX}_dozzle.loadBalancer.server.port=8080"
+
+      # Expose the service with a Traefik router
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.rule=Host(`dozzle.${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.tls=true"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT}"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.tls.certResolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.service=${TRAEFIK_PREFIX}_dozzle"
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/dozzle", "healthcheck"]
