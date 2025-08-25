@@ -93,4 +93,4 @@ services:
       - "traefik.http.services.traefik_dozzle.loadbalancer.server.port=8080"
     healthcheck:
       <<: *healthcheck
-      test: [CMD-SHELL, "/dozzle healthcheck"]
+      test: ["CMD", "/dozzle", "healthcheck"]
