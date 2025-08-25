@@ -100,6 +100,9 @@ services:
       - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT}"
       - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.tls.certResolver=${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.service=${TRAEFIK_PREFIX}_dozzle"
+    depends_on:
+      traefik:
+        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "/dozzle", "healthcheck"]
