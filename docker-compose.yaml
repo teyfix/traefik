@@ -37,7 +37,9 @@ services:
     command: --configFile=/etc/traefik/traefik-static.yaml
     restart: unless-stopped
     networks:
-      - proxy
+      proxy:
+        aliases:
+          - traefik.docker.local
     ports:
       # HTTP web entrypoint for dashboards, web apps, etc.
       - 80:80
