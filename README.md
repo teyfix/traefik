@@ -48,10 +48,8 @@ This project sets up a local HTTPS environment using:
 - `taskfile.yaml`: CLI automation with [`task`](https://taskfile.dev)
 - `certs/`: Extracted TLS certificates, including the root CA
 
-```markdown
 > [!NOTE]
 > Step CA uses `network_mode: host` to resolve `127.0.0.1` domains during ACME challenges, while Traefik connects via `host.docker.internal` for certificate requests.
-```
 
 ---
 
