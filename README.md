@@ -291,7 +291,7 @@ This will stop and remove everything, including volumes and orphan containers.
 
 #### TCP Routers
 
-> [!WARNING] Warning  
+> [!WARNING]
 > This image is outdated and will be updated in the future.
 
 ![Traefik TCP Routers](images/01-tcp-routers.png)
