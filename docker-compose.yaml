@@ -17,7 +17,7 @@ volumes:
 services:
   stepca-init:
     container_name: traefik_stepca_init
-    image: smallstep/step-ca:latest
+    image: smallstep/step-ca:${STEPCA_VER?:}
     restart: no
     entrypoint: /bin/bash
     command: /entrypoint.sh
@@ -31,7 +31,7 @@ services:
 
   stepca:
     container_name: traefik_stepca
-    image: smallstep/step-ca:latest
+    image: smallstep/step-ca:${STEPCA_VER?:}
     restart: unless-stopped
     environment:
       - DOCKER_STEPCA_INIT_NAME
@@ -51,7 +51,7 @@ services:
 
   traefik:
     container_name: traefik
-    image: traefik:v3.5.3
+    image: traefik:${TRAEFIK_VER?:}
     command: --configFile=/etc/traefik/traefik-static.yaml
     restart: unless-stopped
     networks:
@@ -98,7 +98,7 @@ services:
 
   dozzle:
     container_name: traefik_dozzle
-    image: amir20/dozzle:latest
+    image: amir20/dozzle:${DOZZLE_VER?:}
     command: --enable-shell
     restart: unless-stopped
     volumes:
