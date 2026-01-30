@@ -1,0 +1,151 @@
+x-healthcheck: &healthcheck
+  interval: 30s
+  timeout: 5s
+  retries: 15
+  start_period: 3s
+  start_interval: 1s
+
+volumes:
+  redpanda: null
+
+networks:
+  kafka:
+  traefik:
+    name: traefik_proxy
+    external: true
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.3.5
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      # Address the broker advertises to clients that connect to the Kafka API.
+      # Use the internal addresses to connect to the Redpanda brokers'
+      # from inside the same Docker network.
+      # Use the external addresses to connect to the Redpanda brokers'
+      # from outside the Docker network.
+      - --advertise-kafka-addr internal://kafka.lokal:9092,external://kafka.${TRAEFIK_BASE_DOMAIN?}:4040
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      # Address the broker advertises to clients that connect to the HTTP Proxy.
+      - --advertise-pandaproxy-addr
+        internal://kafka.lokal:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      # Redpanda brokers use the RPC API to communicate with each other internally.
+      - --rpc-addr kafka.lokal:33145
+      - --advertise-rpc-addr kafka.lokal:33145
+      # Mode dev-container uses well-known configuration properties for development in containers.
+      - --mode dev-container
+      # Tells Seastar (the framework Redpanda uses under the hood) to use 1 core on the system.
+      - --smp 1
+      - --default-log-level=info
+    restart: unless-stopped
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    expose:
+      - 18081
+      - 18082
+      - 19092
+      - 9644
+    networks:
+      kafka:
+        aliases:
+          - kafka.lokal
+      traefik:
+    labels:
+      - "traefik.enable=true"
+
+      # Create the TCP service for Kafka on port 19092
+      - "traefik.tcp.services.${TRAEFIK_SERVICE_PREFIX?}_kafka.loadBalancer.server.port=19092"
+
+      # Create a router to expose the Kafka service
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka.rule=HostSNI(`kafka.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka.tls=true"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka.entryPoints=${TRAEFIK_TCP_ENTRYPOINT?}"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka.service=${TRAEFIK_SERVICE_PREFIX?}_kafka"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+    healthcheck:
+      <<: *healthcheck
+      test: [CMD-SHELL, curl -f http://localhost:9644/v1/status/ready]
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v3.5.0
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    restart: unless-stopped
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["kafka.lokal:9092"]
+        schemaRegistry:
+          enabled: true
+          urls: ["http://kafka.lokal:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://kafka.lokal:9644"]
+    expose:
+      - 8080
+    networks:
+      - kafka
+      - traefik
+    labels:
+      - "traefik.enable=true"
+
+      # Create the HTTP service for Redpanda Console on port 8080
+      - "traefik.http.services.${TRAEFIK_SERVICE_PREFIX?}_redpanda_console.loadBalancer.server.port=8080"
+
+      # Create a router to expose Redpanda Console
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_redpanda_console.rule=Host(`redpanda.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_redpanda_console.tls=true"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_redpanda_console.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_redpanda_console.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_redpanda_console.service=${TRAEFIK_SERVICE_PREFIX?}_redpanda_console"
+    healthcheck:
+      <<: *healthcheck
+      test: [CMD-SHELL, curl -f http://localhost:8080]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  kafka-ui:
+    image: kafbat/kafka-ui:fc34cfe
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+    volumes:
+      - ./kafka-ui/config.yaml:/etc/kafkaui/dynamic_config.yaml:ro
+    expose:
+      - 8080
+    networks:
+      - kafka
+      - traefik
+    labels:
+      - "traefik.enable=true"
+
+      # Create the HTTP service for Redpanda Console on port 8080
+      - "traefik.http.services.${TRAEFIK_SERVICE_PREFIX?}_kafka_ui.loadBalancer.server.port=8080"
+
+      # Create a router to expose Redpanda Console
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka_ui.rule=Host(`kafka-ui.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka_ui.tls=true"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka_ui.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka_ui.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_kafka_ui.service=${TRAEFIK_SERVICE_PREFIX?}_kafka_ui"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+    healthcheck:
+      <<: *healthcheck
+      test: [CMD-SHELL, wget -q --spider http://localhost:8080/actuator/health]
