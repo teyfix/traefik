@@ -1,0 +1,62 @@
+x-healthcheck: &healthcheck
+  interval: 30s
+  timeout: 5s
+  retries: 15
+  start_period: 3s
+  start_interval: 1s
+
+networks:
+  minio:
+  traefik:
+    name: traefik_proxy
+    external: true
+
+volumes:
+  minio_data:
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
+    restart: unless-stopped
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER?}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD?}
+      - MINIO_BROWSER_REDIRECT=${MINIO_BROWSER_REDIRECT?}
+      - MINIO_BROWSER_CONTENT_SECURITY_POLICY=${MINIO_BROWSER_CONTENT_SECURITY_POLICY?}
+    expose:
+      - 9000
+      - 9001
+    networks:
+      minio:
+        aliases:
+          - s3.lokal
+      traefik:
+    labels:
+      - "traefik.enable=true"
+
+      # Create the S3 API service on port 9000
+      - "traefik.http.services.${TRAEFIK_SERVICE_PREFIX?}_s3.loadBalancer.server.port=9000"
+
+      # Create a router to expose the S3 API
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_s3.rule=Host(`s3.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_s3.tls=true"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_s3.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_s3.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_s3.service=${TRAEFIK_SERVICE_PREFIX?}_s3"
+
+      # Create the MinIO Console service on port 9001
+      - "traefik.http.services.${TRAEFIK_SERVICE_PREFIX?}_minio.loadBalancer.server.port=9001"
+
+      # Create a router to expose the MinIO Console
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_minio.rule=Host(`minio.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_minio.tls=true"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_minio.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_minio.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_minio.service=${TRAEFIK_SERVICE_PREFIX?}_minio"
+    volumes:
+      - minio_data:/data
+
+    healthcheck:
+      <<: *healthcheck
+      test: [CMD-SHELL, mc ready local]
