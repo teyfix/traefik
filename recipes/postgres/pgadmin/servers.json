@@ -1,0 +1,26 @@
+{
+  "Servers": {
+    "1": {
+      "ConnectionParameters": {
+        "connect_timeout": 10,
+        "sslcert": "<STORAGE_DIR>/.postgresql/postgresql.crt",
+        "sslkey": "<STORAGE_DIR>/.postgresql/postgresql.key",
+        "sslmode": "prefer"
+      },
+      "DBRestrictionType": "databases",
+      "Group": "Servers",
+      "Host": "pg.lokal",
+      "KerberosAuthentication": false,
+      "MaintenanceDB": "postgres",
+      "Name": "Development",
+      "Port": 5432,
+      "Tags": [],
+      "TunnelAuthentication": 0,
+      "TunnelKeepAlive": 0,
+      "TunnelPort": "22",
+      "TunnelPromptPassword": 0,
+      "UseSSHTunnel": 0,
+      "Username": "supabase_admin"
+    }
+  }
+}

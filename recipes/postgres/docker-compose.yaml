@@ -1,0 +1,79 @@
+x-healthcheck: &healthcheck
+  interval: 30s
+  timeout: 5s
+  retries: 15
+  start_period: 3s
+  start_interval: 1s
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+
+networks:
+  postgres:
+  traefik:
+    name: traefik_proxy
+    external: true
+
+services:
+  postgres:
+    # Use Supabase image for richer extension support (e.g https://fdw.dev)
+    # https://hub.docker.com/r/supabase/postgres
+    image: supabase/postgres:17.6.1.072
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB?}
+      - POSTGRES_USER=${POSTGRES_USER?}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD?}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/initdb.sql:/docker-entrypoint-initdb.d/zz-initdb.sql:ro
+    expose:
+      - 5432
+    networks:
+      postgres:
+        aliases:
+          - pg.lokal
+      traefik:
+    labels:
+      - "traefik.enable=true"
+
+      # Create the TCP service for PostgreSQL
+      - "traefik.tcp.services.${TRAEFIK_SERVICE_PREFIX?}_pg.loadBalancer.server.port=5432"
+
+      # Create a router to expose the PostgreSQL service
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_pg.rule=HostSNI(`pg.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_pg.tls=true"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_pg.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_pg.entryPoints=${TRAEFIK_TCP_ENTRYPOINT?}"
+      - "traefik.tcp.routers.${TRAEFIK_SERVICE_PREFIX?}_pg.service=${TRAEFIK_SERVICE_PREFIX?}_pg"
+    healthcheck:
+      <<: *healthcheck
+      test: [CMD-SHELL, PGPASSWORD="$$POSTGRES_PASSWORD" pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"]
+
+  pgadmin:
+    image: dpage/pgadmin4:9.11
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL?}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD?}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    networks:
+      postgres:
+      traefik:
+    labels:
+      - "traefik.enable=true"
+
+      # Create the HTTP service for pgAdmin
+      - "traefik.http.services.${TRAEFIK_SERVICE_PREFIX?}_pgadmin.loadBalancer.server.port=80"
+
+      # Create a router to expose pgAdmin service
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_pgadmin.rule=Host(`pgadmin.${TRAEFIK_BASE_DOMAIN?}`)"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_pgadmin.tls=true"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_pgadmin.tls.certResolver=${TRAEFIK_ACME_RESOLVER?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_pgadmin.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT?}"
+      - "traefik.http.routers.${TRAEFIK_SERVICE_PREFIX?}_pgadmin.service=${TRAEFIK_SERVICE_PREFIX?}_pgadmin"
+    healthcheck:
+      <<: *healthcheck
+      test: [CMD-SHELL, wget -q --spider http://localhost]
