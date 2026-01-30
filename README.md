@@ -3,15 +3,20 @@
 This project sets up a local HTTPS environment using:
 
 - [Traefik](https://traefik.io/) as a reverse proxy
-- [Smallstep Step CA](https://smallstep.com/docs/step-ca/) for issuing local TLS certificates via ACME
+- [Smallstep Step CA](https://smallstep.com/docs/step-ca/) for issuing local TLS
+  certificates via ACME
 - Automatic trust installation for `root_ca.crt`
 - Taskfile automation (`task`) for convenience
 - Zero DNS configuration thanks to [sslip.io](https://sslip.io/)
-  - This allows you to access services like `https://traefik.127-0-0-1.sslip.io` without any DNS configuration.
+  - This allows you to access services like `https://traefik.127-0-0-1.sslip.io`
+    without any DNS configuration.
 
 ![Traefik HTTP Routers](images/00-https-routers.png)
 
 ## Table of Contents
+
+<details>
+<summary>Expand <strong>Table of Contents</strong></summary>
 
 - [🛡️ Local Dev with Traefik + Step CA + ACME TLS](#️-local-dev-with-traefik--step-ca--acme-tls)
   - [Table of Contents](#table-of-contents)
@@ -41,6 +46,8 @@ This project sets up a local HTTPS environment using:
       - [RedPanda Console](#redpanda-console)
       - [Dozzle](#dozzle)
 
+</details>
+
 ## 🔧 Project Structure
 
 - `docker-compose.yaml`: Orchestrates Traefik and Step CA
@@ -48,8 +55,10 @@ This project sets up a local HTTPS environment using:
 - `taskfile.yaml`: CLI automation with [`task`](https://taskfile.dev)
 - `certs/`: Extracted TLS certificates, including the root CA
 
-> [!NOTE]
-> Step CA uses `network_mode: host` to resolve `127.0.0.1` domains during ACME challenges, while Traefik connects via `host.docker.internal` for certificate requests.
+> [!NOTE]  
+> Step CA uses `network_mode: host` to resolve `127.0.0.1` domains during ACME
+> challenges, while Traefik connects via `host.docker.internal` for certificate
+> requests.
 
 ---
 
@@ -57,7 +66,8 @@ This project sets up a local HTTPS environment using:
 
 ### 1. Clone the Repository
 
-First, clone this repository to a local directory where you'll be running your development environment:
+First, clone this repository to a local directory where you'll be running your
+development environment:
 
 ```sh
 git clone https://github.com/teyfix/traefik
@@ -91,8 +101,9 @@ This will:
 
 ✅ Works for WSL, Debian, Ubuntu, etc.
 
-> [!TIP]
-> You can use `/usr/local/share/ca-certificates/traefik-stepca-root-ca.crt` as the root certificate for apps that does not use the system trust store.
+> [!TIP]  
+> You can use `/usr/local/share/ca-certificates/traefik-stepca-root-ca.crt` as
+> the root certificate for apps that does not use the system trust store.
 
 ### 4. Trust the Root CA (Windows)
 
@@ -108,17 +119,22 @@ Then follow these steps to install the certificate:
 1. In the opened folder, double-click the file named `root_ca.crt`.
 2. A security warning will appear — click **"Open"**.
 3. The certificate viewer will open. Click **"Install Certificate..."**.
-4. Choose **"Local Machine"** (this requires administrator privileges), then click **Next**.
-5. Select **"Place all certificates in the following store"**, then click **Browse**.
+4. Choose **"Local Machine"** (this requires administrator privileges), then
+   click **Next**.
+5. Select **"Place all certificates in the following store"**, then click
+   **Browse**.
 6. Choose **"Trusted Root Certification Authorities"**, then click **OK**.
 7. Click **Next**, then **Finish**.
 8. A final prompt will confirm the installation — click **Yes**.
 
-> 🛡️ You should now be able to visit services like `https://traefik.127-0-0-1.sslip.io` in your browser without any certificate warnings.
+> 🛡️ You should now be able to visit services like
+> `https://traefik.127-0-0-1.sslip.io` in your browser without any certificate
+> warnings.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
-You can run services like PostgreSQL behind Traefik using TCP with TLS termination:
+You can run services like PostgreSQL behind Traefik using TCP with TLS
+termination:
 
 ```yaml
 networks:
@@ -141,14 +157,17 @@ services:
       - traefik_proxy
 ```
 
-You can now securely connect to PostgreSQL at `pg.teyfix.127-0-0-1.sslip.io:4040` with TLS.
+You can now securely connect to PostgreSQL at
+`pg.teyfix.127-0-0-1.sslip.io:4040` with TLS.
 
-> [!NOTE]
-> Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's configuration, which is designed for non-HTTP services like databases.
+> [!NOTE]  
+> Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's
+> configuration, which is designed for non-HTTP services like databases.
 
 ## 🌐 Example: HTTP Service (MinIO) Behind Traefik
 
-You can also expose standard HTTP services like **MinIO** behind Traefik with HTTPS:
+You can also expose standard HTTP services like **MinIO** behind Traefik with
+HTTPS:
 
 ```yaml
 networks:
@@ -214,8 +233,9 @@ Once up, you can access the Traefik dashboard via either:
 - **HTTPS (recommended)**: `https://traefik.127-0-0-1.sslip.io`
 - **HTTP (insecure)**: `http://localhost:8080`
 
-> [!TIP]
-> The HTTPS version uses certificates issued by your local Step CA, while the HTTP version runs in insecure mode for development convenience.
+> [!TIP]  
+> The HTTPS version uses certificates issued by your local Step CA, while the
+> HTTP version runs in insecure mode for development convenience.
 
 ---
 
@@ -227,8 +247,9 @@ If you need direct access to Step CA for advanced certificate management:
 https://localhost:9000
 ```
 
-> [!NOTE]
-> Direct Step CA access is typically not needed for normal development workflows, as Traefik handles certificate requests automatically via ACME.
+> [!NOTE]  
+> Direct Step CA access is typically not needed for normal development
+> workflows, as Traefik handles certificate requests automatically via ACME.
 
 ---
 
@@ -242,14 +263,20 @@ https://localhost:9000
 
 ## 🌐 Network Architecture
 
-This setup uses a specific networking configuration to handle certificate validation:
+This setup uses a specific networking configuration to handle certificate
+validation:
 
-- **Step CA** runs in `network_mode: host` to properly resolve `127.0.0.1` domains during ACME challenges
-- **Traefik** connects to Step CA via `host.docker.internal:9000` for certificate requests
-- **Services** run on the `traefik_proxy` bridge network for proper service discovery
+- **Step CA** runs in `network_mode: host` to properly resolve `127.0.0.1`
+  domains during ACME challenges
+- **Traefik** connects to Step CA via `host.docker.internal:9000` for
+  certificate requests
+- **Services** run on the `traefik_proxy` bridge network for proper service
+  discovery
 
-> [!IMPORTANT]
-> Step CA cannot access Traefik services for ACME validation when both are on Docker bridge networks due to `127.0.0.1` resolution limitations. The host networking mode for Step CA resolves this issue.
+> [!IMPORTANT]  
+> Step CA cannot access Traefik services for ACME validation when both are on
+> Docker bridge networks due to `127.0.0.1` resolution limitations. The host
+> networking mode for Step CA resolves this issue.
 
 ---
 
@@ -291,7 +318,7 @@ This will stop and remove everything, including volumes and orphan containers.
 
 #### TCP Routers
 
-> [!WARNING]
+> [!WARNING]  
 > This image is outdated and will be updated in the future.
 
 ![Traefik TCP Routers](images/01-tcp-routers.png)
