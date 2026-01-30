@@ -44,7 +44,7 @@ FROM
 -- ===============================
 -- 4️⃣ Grant Schema Privileges
 -- ===============================
--- signal_collapse role
+-- recipe role
 GRANT ALL ON SCHEMA "recipe_schema" TO "recipe_user";
 
 GRANT ALL ON SCHEMA "keycloak" TO "recipe_user";
