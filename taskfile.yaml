@@ -1,12 +1,32 @@
 version: 3
 tasks:
-  up: docker compose up -d --force-recreate --remove-orphans {{.CLI_ARGS}}
-  down: docker compose down --remove-orphans --volumes {{.CLI_ARGS}}
+  up:
+    desc: Starts or recreates the base services without stopping Tailscale
+    cmds:
+      - docker compose up -d --force-recreate --remove-orphans {{.CLI_ARGS}}
+  up:full:
+    desc: Starts or recreates the base and Tailscale services
+    cmds:
+      - docker compose --profile tailscale up -d --force-recreate --remove-orphans {{.CLI_ARGS}}
+  down:
+    desc: Stops the base and Tailscale services while preserving volumes
+    cmds:
+      - docker compose --profile tailscale down --remove-orphans {{.CLI_ARGS}}
   logs: docker compose logs --follow --tail 0 {{.CLI_ARGS}}
   recreate:
+    desc: Recreates the base services without stopping Tailscale
+    cmds:
+      - task: up
+  recreate:full:
+    desc: Stops and recreates the base and Tailscale services
     cmds:
       - task: down
-      - task: up
+      - task: up:full
+  purge:
+    desc: Stops the stack and permanently removes all infrastructure volumes
+    prompt: This permanently deletes the Step CA, ACME, and Tailscale state. Continue?
+    cmds:
+      - docker compose --profile tailscale down --remove-orphans --volumes {{.CLI_ARGS}}
   certs:
     desc: Copies certs from container to host
     cmds:

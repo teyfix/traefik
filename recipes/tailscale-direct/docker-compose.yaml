@@ -1,0 +1,16 @@
+name: tailscale-direct-recipe
+
+networks:
+  tailscale_services:
+    name: tailscale_services
+    external: true
+
+services:
+  hello:
+    image: traefik/whoami:v1.11.0
+    profiles:
+      - direct
+    networks:
+      tailscale_services:
+        aliases:
+          - hello.smoke.dkr.tail.gg

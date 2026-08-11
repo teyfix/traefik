@@ -1,59 +1,32 @@
-# 🛡️ Local Dev with Traefik + Step CA + ACME TLS
+# Shared local ingress, TLS, and tailnet DNS
 
-This project sets up a local HTTPS environment using:
+This repository provides reusable development ingress for multiple projects:
 
-- [Traefik](https://traefik.io/) as a reverse proxy
-- [Smallstep Step CA](https://smallstep.com/docs/step-ca/) for issuing local TLS
-  certificates via ACME
-- Automatic trust installation for `root_ca.crt`
-- Taskfile automation (`task`) for convenience
-- Zero DNS configuration thanks to [sslip.io](https://sslip.io/)
-  - This allows you to access services like `https://traefik.127-0-0-1.sslip.io`
-    without any DNS configuration.
+- [Traefik](https://traefik.io/) reverse proxying on the shared
+  `traefik_proxy` Docker network
+- [Smallstep Step CA](https://smallstep.com/docs/step-ca/) certificates issued
+  to Traefik through ACME
+- a persistent Tailscale subnet router and CoreDNS split DNS for `tail.gg`
+- [sslip.io](https://sslip.io/) names for host-only development without
+  tailnet DNS
+- optional, self-contained service recipes
+
+Projects keep ownership of their application containers and Traefik labels.
+This stack owns the cross-project edge, certificate authority, DNS server, and
+Tailscale connector.
 
 ![Traefik HTTP Routers](images/00-https-routers.png)
 
-## Table of Contents
-
-<details>
-<summary>Expand <strong>Table of Contents</strong></summary>
-
-- [🛡️ Local Dev with Traefik + Step CA + ACME TLS](#️-local-dev-with-traefik--step-ca--acme-tls)
-  - [Table of Contents](#table-of-contents)
-  - [🔧 Project Structure](#-project-structure)
-  - [🚀 Quick Start](#-quick-start)
-    - [1. Clone the Repository](#1-clone-the-repository)
-    - [2. Start the environment](#2-start-the-environment)
-    - [3. Trust the root CA (Linux)](#3-trust-the-root-ca-linux)
-    - [4. Trust the Root CA (Windows)](#4-trust-the-root-ca-windows)
-  - [🧪 Example: Secure PostgreSQL behind Traefik](#-example-secure-postgresql-behind-traefik)
-  - [🌐 Example: HTTP Service (MinIO) Behind Traefik](#-example-http-service-minio-behind-traefik)
-  - [🛠 Available Tasks](#-available-tasks)
-  - [🌐 Traefik Dashboard](#-traefik-dashboard)
-  - [🔐 Step CA Access](#-step-ca-access)
-  - [📄 TLS Certificate Details](#-tls-certificate-details)
-  - [🌐 Network Architecture](#-network-architecture)
-  - [🛡 Security Notes](#-security-notes)
-  - [🧼 Cleanup](#-cleanup)
-  - [📦 Requirements](#-requirements)
-  - [Screenshots](#screenshots)
-    - [Traefik](#traefik)
-      - [Dashboard](#dashboard)
-      - [HTTP Routers](#http-routers)
-      - [TCP Routers](#tcp-routers)
-    - [Services](#services)
-      - [KeyCloak Dashboard](#keycloak-dashboard)
-      - [RedPanda Console](#redpanda-console)
-      - [Dozzle](#dozzle)
-
-</details>
-
 ## 🔧 Project Structure
 
-- `docker-compose.yaml`: Orchestrates Traefik and Step CA
+- `docker-compose.yaml`: master Compose model and stable shared networks
+- `compose/edge/`: Step CA and Traefik
+- `compose/tailscale/`: Tailscale connector, CoreDNS, and its operator guide
+- `compose/observability/`: shared operational tooling such as Dozzle
 - `traefik/traefik-static.yaml`: Static Traefik configuration with ACME resolver
 - `taskfile.yaml`: CLI automation with [`task`](https://taskfile.dev)
 - `certs/`: Extracted TLS certificates, including the root CA
+- `recipes/`: optional examples that are not included in the central stack
 
 > [!NOTE]  
 > Step CA uses `network_mode: host` to resolve `127.0.0.1` domains during ACME
@@ -76,19 +49,50 @@ cd traefik
 
 Make sure you're inside the cloned folder before running any of the next steps.
 
-### 2. Start the environment
+### 2. Configure Tailscale
+
+Set the non-secret shared network values in `.env`. The intended defaults are:
+
+```env
+TAIL_DOMAIN=tail.gg
+DIRECT_DOMAIN=dkr.tail.gg
+TS_SERVICE_SUBNET=10.10.10.0/24
+TS_DNS_SERVER=10.10.10.10
+TS_ROUTES=10.10.10.0/24,172.16.0.0/12
+```
+
+Complete the one-time tailnet policy, route-approval, DNS, and auth-key setup in
+[`compose/tailscale/README.md`](compose/tailscale/README.md). Put `TS_AUTHKEY`
+only in the documented gitignored local environment file; never commit it.
+
+### 3. Render and start the base environment
 
 ```bash
+docker compose config
 task up
 ```
 
 This will:
 
-- Start Step CA and Traefik
+- Start Step CA, Traefik, and observability services
 - Wait until Step CA is healthy
-- Traefik will generate and request certs using ACME
+- Allow Traefik to request certificates using ACME
+- Create stable external networks for application projects
 
-### 3. Trust the root CA (Linux)
+Tailscale and CoreDNS are deliberately behind the `tailscale` profile. After
+the tailnet administration and local auth-key setup are complete, render and
+start the full stack with:
+
+```bash
+docker compose --profile tailscale config
+task up:full
+```
+
+`task up:full` starts or recreates the base dependencies as well as Tailscale
+and CoreDNS. The equivalent raw start command is
+`docker compose --profile tailscale up -d`.
+
+### 4. Trust the root CA (Linux)
 
 ```bash
 task certs:install
@@ -103,9 +107,9 @@ This will:
 
 > [!TIP]  
 > You can use `/usr/local/share/ca-certificates/traefik-stepca-root-ca.crt` as
-> the root certificate for apps that does not use the system trust store.
+> the root certificate for apps that do not use the system trust store.
 
-### 4. Trust the Root CA (Windows)
+### 5. Trust the Root CA (Windows)
 
 To make Windows trust the locally issued TLS certificates:
 
@@ -130,6 +134,18 @@ Then follow these steps to install the certificate:
 > 🛡️ You should now be able to visit services like
 > `https://traefik.127-0-0-1.sslip.io` in your browser without any certificate
 > warnings.
+
+### 6. Attach an application project
+
+For the normal HTTPS path, attach a service to `traefik_proxy` and keep its
+project-owned Traefik labels. A host such as `api.ukiyo.tail.gg` resolves to
+Traefik, which then selects the project router.
+
+Direct container access is opt-in and uses an exact alias such as
+`hello.ukiyo.dkr.tail.gg` on the external `tailscale_services` network. It
+bypasses Traefik security and TLS. See the
+[`tailscale-direct` recipe](recipes/tailscale-direct/README.md) before using
+that path.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
@@ -215,14 +231,17 @@ services:
 
 ## 🛠 Available Tasks
 
-| Task                 | Description                                     |
-| -------------------- | ----------------------------------------------- |
-| `task up`            | Start containers with fresh state               |
-| `task down`          | Stop and remove containers, volumes, orphans    |
-| `task recreate`      | Fully restart the stack                         |
-| `task logs`          | Follow logs of all containers                   |
-| `task certs`         | Export certs from the Step CA container         |
-| `task certs:install` | Install the root CA into your Linux trust store |
+| Task                 | Description                                                   |
+| -------------------- | ------------------------------------------------------------- |
+| `task up`            | Start/recreate base services without stopping Tailscale       |
+| `task up:full`       | Start/recreate base, Tailscale, and CoreDNS services          |
+| `task down`          | Stop both profiles while preserving persistent state          |
+| `task recreate`      | Recreate base services without stopping Tailscale             |
+| `task recreate:full` | Stop and recreate both profiles                               |
+| `task logs`          | Follow logs of all containers                                 |
+| `task certs`         | Export certificates from Step CA                              |
+| `task certs:install` | Install the root CA into your Linux trust store               |
+| `task purge`         | Stop both profiles and remove CA, ACME, and Tailscale state    |
 
 ---
 
@@ -263,8 +282,27 @@ https://localhost:9000
 
 ## 🌐 Network Architecture
 
-This setup uses a specific networking configuration to handle certificate
-validation:
+This stack exposes application services through two distinct paths:
+
+- Ordinary names such as `api.ukiyo.tail.gg` resolve through CoreDNS at
+  `10.10.10.10` to Traefik's Docker address. The project service only needs the
+  `traefik_proxy` network and its own labels.
+- Names under `dkr.tail.gg`, such as `hello.ukiyo.dkr.tail.gg`, resolve through
+  Docker embedded DNS to the exact alias of a container explicitly joined to
+  `tailscale_services`.
+
+Tailscale routes the returned IP, not the hostname. CoreDNS selects the
+destination address class. The subnet router advertises `10.10.10.0/24` for
+CoreDNS/direct containers and `172.16.0.0/12` for Docker/Traefik.
+
+Traefik publishes ports `80`, `443`, `8080`, and `4040` only on
+`127.0.0.1`. Host-local clients can still use those published ports, while
+ordinary LAN clients cannot reach them through a host interface. Tailnet
+clients instead reach Traefik's Docker address through the approved
+`172.16.0.0/12` subnet route. This boundary depends on restrictive Tailscale
+grants: private `tail.gg` DNS names are service discovery, not authorization.
+
+Certificate validation additionally uses this configuration:
 
 - **Step CA** runs in `network_mode: host` to properly resolve `127.0.0.1`
   domains during ACME challenges
@@ -278,6 +316,10 @@ validation:
 > Docker bridge networks due to `127.0.0.1` resolution limitations. The host
 > networking mode for Step CA resolves this issue.
 
+The complete tailnet policy, split-DNS, route, ownership, direct-container, and
+migration contract is documented in
+[`compose/tailscale/README.md`](compose/tailscale/README.md).
+
 ---
 
 ## 🛡 Security Notes
@@ -285,6 +327,18 @@ validation:
 - This setup is for local/dev use only
 - Certificates are **not publicly trusted**
 - Browsers may still show a warning unless root CA is manually trusted
+- Host-published Traefik ports are loopback-only; tailnet access uses the
+  routed Docker address and must be restricted with Tailscale grants
+- Private `tail.gg` DNS records do not authorize access or replace application
+  authentication for sensitive services
+- Direct `*.dkr.tail.gg` exposure bypasses Traefik TLS, middleware, and auth
+- `172.16.0.0/12` routing can overlap client LAN, VPN, or Docker networks
+- Tailnet split DNS for `tail.gg` shadows public records under the same suffix
+
+Using an owned suffix provides stable OAuth callback names, but providers such
+as Google still require the configured domain, HTTPS rules, and redirect URI to
+match exactly. Some providers require public reachability or a publicly trusted
+certificate; trusting the private Step CA locally does not satisfy those checks.
 
 ---
 
@@ -294,13 +348,16 @@ validation:
 task down
 ```
 
-This will stop and remove everything, including volumes and orphan containers.
+This stops the stack and removes orphan containers while preserving persistent
+Step CA, ACME, and Tailscale state. To deliberately delete that state, use
+`task purge` and confirm the destructive prompt.
 
 ---
 
 ## 📦 Requirements
 
 - [Docker](https://www.docker.com/)
+- Docker Compose with support for top-level `include`
 - [Task](https://taskfile.dev)
 - Linux or WSL (for root CA trust automation)
 

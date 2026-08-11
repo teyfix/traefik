@@ -1,0 +1,38 @@
+x-healthcheck: &healthcheck
+  interval: 30s
+  timeout: 5s
+  retries: 15
+  start_period: 3s
+  start_interval: 1s
+
+services:
+  dozzle:
+    container_name: traefik_dozzle
+    image: amir20/dozzle:${DOZZLE_VER?:}
+    command: --enable-shell
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - 8080
+    networks:
+      - proxy
+    labels:
+      # Enable Traefik discovery for this container
+      - "traefik.enable=true"
+
+      # Create a Traefik service on port 8080 for the container
+      - "traefik.http.services.${TRAEFIK_PREFIX}_dozzle.loadBalancer.server.port=8080"
+
+      # Expose the service with a Traefik router
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.rule=Host(`dozzle.${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.tls=true"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.entryPoints=${TRAEFIK_HTTPS_ENTRYPOINT}"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.tls.certResolver=${TRAEFIK_CERT_RESOLVER}"
+      - "traefik.http.routers.${TRAEFIK_PREFIX}_dozzle.service=${TRAEFIK_PREFIX}_dozzle"
+    depends_on:
+      traefik:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/dozzle", "healthcheck"]

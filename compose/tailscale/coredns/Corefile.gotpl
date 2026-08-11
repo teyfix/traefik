@@ -1,0 +1,30 @@
+{{- $tailDomain := getenv "TAIL_DOMAIN" -}}
+{{- $tailDomainEsc := $tailDomain | regexp.QuoteMeta -}}
+{{- $directDomain := getenv "DIRECT_DOMAIN" -}}
+
+{{ $directDomain }} {
+  log
+  errors
+
+  # Exact network aliases in this zone are resolved by Docker's embedded DNS.
+  # There is intentionally no wildcard fallback to Traefik in this subzone.
+  forward . 127.0.0.11
+  cache 30
+}
+
+{{ $tailDomain }} {
+  log
+  errors
+  health :8080
+  ready :8181
+
+  template IN A {
+    match ^(.*\.)?{{ $tailDomainEsc }}\.$
+    answer "{{ "{{ .Name }}" }} 60 IN A {$TRAEFIK_IP}"
+  }
+
+  template IN AAAA {
+    match ^(.*\.)?{{ $tailDomainEsc }}\.$
+    rcode NOERROR
+  }
+}
