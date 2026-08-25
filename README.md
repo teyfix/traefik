@@ -132,7 +132,7 @@ Then follow these steps to install the certificate:
 8. A final prompt will confirm the installation — click **Yes**.
 
 > 🛡️ You should now be able to visit services like
-> `https://traefik.127-0-0-1.sslip.io` in your browser without any certificate
+> `https://traefik.tail.gg` in your browser without any certificate
 > warnings.
 
 ### 6. Attach an application project
@@ -249,7 +249,7 @@ services:
 
 Once up, you can access the Traefik dashboard via either:
 
-- **HTTPS (recommended)**: `https://traefik.127-0-0-1.sslip.io`
+- **HTTPS (recommended)**: `https://traefik.tail.gg`
 - **HTTP (insecure)**: `http://localhost:8080`
 
 > [!TIP]  
