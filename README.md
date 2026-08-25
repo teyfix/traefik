@@ -7,8 +7,7 @@ This repository provides reusable development ingress for multiple projects:
 - [Smallstep Step CA](https://smallstep.com/docs/step-ca/) certificates issued
   to Traefik through ACME
 - a persistent Tailscale subnet router and CoreDNS split DNS for `tail.gg`
-- [sslip.io](https://sslip.io/) names for host-only development without
-  tailnet DNS
+- private `tail.gg` service names routed through the shared Traefik ingress
 - optional, self-contained service recipes
 
 Projects keep ownership of their application containers and Traefik labels.
@@ -29,9 +28,9 @@ Tailscale connector.
 - `recipes/`: optional examples that are not included in the central stack
 
 > [!NOTE]  
-> Step CA uses `network_mode: host` to resolve `127.0.0.1` domains during ACME
-> challenges, while Traefik connects via `host.docker.internal` for certificate
-> requests.
+> Step CA uses `network_mode: host` so ACME challenges follow the host's
+> Tailscale split DNS and advertised Docker routes. Traefik connects to the CA
+> via `host.docker.internal` for certificate requests.
 
 ---
 
@@ -163,7 +162,7 @@ services:
     image: teyfix/timescaledb-pgrx:latest
     labels:
       - "traefik.enable=true"
-      - "traefik.tcp.routers.teyfix_pg.rule=HostSNI(`pg.teyfix.127-0-0-1.sslip.io`)"
+      - "traefik.tcp.routers.teyfix_pg.rule=HostSNI(`pg.teyfix.tail.gg`)"
       - "traefik.tcp.routers.teyfix_pg.entrypoints=shared"
       - "traefik.tcp.routers.teyfix_pg.service=teyfix_pg"
       - "traefik.tcp.routers.teyfix_pg.tls=true"
@@ -174,7 +173,7 @@ services:
 ```
 
 You can now securely connect to PostgreSQL at
-`pg.teyfix.127-0-0-1.sslip.io:4040` with TLS.
+`pg.teyfix.tail.gg:4040` with TLS.
 
 > [!NOTE]  
 > Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's
@@ -206,7 +205,7 @@ services:
       - "traefik.enable=true"
 
       # MinIO API
-      - "traefik.http.routers.teyfix_minio_api.rule=Host(`minio-api.teyfix.127-0-0-1.sslip.io`)"
+      - "traefik.http.routers.teyfix_minio_api.rule=Host(`minio-api.teyfix.tail.gg`)"
       - "traefik.http.routers.teyfix_minio_api.tls=true"
       - "traefik.http.routers.teyfix_minio_api.entrypoints=websecure"
       - "traefik.http.routers.teyfix_minio_api.tls.certresolver=stepca"
@@ -214,7 +213,7 @@ services:
       - "traefik.http.services.teyfix_minio_api.loadbalancer.server.port=9000"
 
       # MinIO Console
-      - "traefik.http.routers.teyfix_minio_console.rule=Host(`minio-console.teyfix.127-0-0-1.sslip.io`)"
+      - "traefik.http.routers.teyfix_minio_console.rule=Host(`minio-console.teyfix.tail.gg`)"
       - "traefik.http.routers.teyfix_minio_console.tls=true"
       - "traefik.http.routers.teyfix_minio_console.entrypoints=websecure"
       - "traefik.http.routers.teyfix_minio_console.tls.certresolver=stepca"
@@ -224,8 +223,8 @@ services:
 
 ✅ Once running, you can securely access:
 
-- `https://minio-api.teyfix.127-0-0-1.sslip.io` for the API
-- `https://minio-console.teyfix.127-0-0-1.sslip.io` for the web console
+- `https://minio-api.teyfix.tail.gg` for the API
+- `https://minio-console.teyfix.tail.gg` for the web console
 
 ---
 
@@ -304,17 +303,16 @@ grants: private `tail.gg` DNS names are service discovery, not authorization.
 
 Certificate validation additionally uses this configuration:
 
-- **Step CA** runs in `network_mode: host` to properly resolve `127.0.0.1`
-  domains during ACME challenges
+- **Step CA** runs in `network_mode: host` to use the host's tailnet split DNS
+  and advertised routes during ACME challenges
 - **Traefik** connects to Step CA via `host.docker.internal:9000` for
   certificate requests
 - **Services** run on the `traefik_proxy` bridge network for proper service
   discovery
 
 > [!IMPORTANT]  
-> Step CA cannot access Traefik services for ACME validation when both are on
-> Docker bridge networks due to `127.0.0.1` resolution limitations. The host
-> networking mode for Step CA resolves this issue.
+> Step CA must use host networking so ACME validation follows the same tailnet
+> DNS and routed Docker path as clients.
 
 The complete tailnet policy, split-DNS, route, ownership, direct-container, and
 migration contract is documented in

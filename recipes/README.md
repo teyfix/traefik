@@ -47,13 +47,16 @@ No recipe modifies the core Traefik or Step CA setup.
 
 Recipes assume that you have already:
 
-1. Started the main stack:
+1. Started the main stack with Tailscale and CoreDNS:
 
    ```bash
-   task up
+   task up:full
    ```
 
-2. Trusted the local root CA on your machine
+2. Configured `tail.gg` split DNS and approved the advertised subnet routes as
+   documented in [`compose/tailscale/README.md`](../compose/tailscale/README.md)
+
+3. Trusted the local root CA on your machine
 
 If Traefik and Step CA are not running, recipes will start but **TLS will
 fail**.
@@ -73,13 +76,13 @@ fail**.
 All recipes use the same domain pattern:
 
 ```txt
-<service>.<prefix>.127-0-0-1.sslip.io
+<service>.<prefix>.tail.gg
 ```
 
 For example:
 
-- `pg.teyfix.127-0-0-1.sslip.io`
-- `pgadmin.teyfix.127-0-0-1.sslip.io`
+- `pg.teyfix.tail.gg`
+- `pgadmin.teyfix.tail.gg`
 
 Certificates are:
 
@@ -87,7 +90,8 @@ Certificates are:
 - Requested by **Traefik via ACME**
 - Trusted locally once the root CA is installed
 
-No DNS configuration is required.
+CoreDNS resolves the wildcard after the one-time tailnet split-DNS setup, so
+recipes do not require individual DNS records.
 
 ---
 
@@ -137,7 +141,7 @@ and `pgadmin.<base-domain>` to keep domains consistent and predictable.
 **Example:**
 
 ```env
-TRAEFIK_BASE_DOMAIN=teyfix.127-0-0-1.sslip.io
+TRAEFIK_BASE_DOMAIN=teyfix.tail.gg
 ```
 
 ---

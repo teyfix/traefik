@@ -25,6 +25,61 @@ direct name, for example hello.ukiyo.dkr.tail.gg
   -> container's native port and protocol
 ```
 
+## How hostname discovery works
+
+There is no per-service DNS record synchronization with Tailscale. The DNS and
+service-discovery layers are independent and meet at the requested hostname:
+
+1. The Tailscale admin console delegates the `tail.gg` suffix to the restricted
+   nameserver at `10.10.10.10`. It does not contain records for application
+   services.
+2. A tailnet client's local Tailscale resolver sends every `tail.gg` query to
+   that CoreDNS address through the advertised `10.10.10.0/24` subnet route.
+3. For an ordinary name, CoreDNS synthesizes an A record containing Traefik's
+   Docker IP. The wildcard covers the apex and every subdomain, so adding
+   `api.project.tail.gg` does not require a CoreDNS edit or a record in the
+   Tailscale admin console.
+4. Independently, Traefik watches the Docker socket. When a running container
+   on `traefik_proxy` has enabled labels, Traefik creates the declared router
+   and maps its `Host(...)` or `HostSNI(...)` rule to that container and port.
+5. The client connects to the synthesized IP through the advertised
+   `172.16.0.0/12` route. Traefik selects the router by the original HTTP Host
+   header or TLS SNI name and requests a matching certificate from Step CA.
+
+CoreDNS therefore does not discover containers, inspect Traefik labels, or
+store a list of ordinary services. It deliberately answers all ordinary
+`*.tail.gg` names with the same Traefik IP. A name can resolve successfully
+even when no matching router exists; in that case Traefik returns its unmatched
+route response and may present its default certificate. DNS resolution proves
+only that the shared ingress is discoverable, not that an application exists.
+
+Adding a normal HTTPS service requires only:
+
+- a unique `*.tail.gg` hostname in its Traefik router label;
+- membership in the external `traefik_proxy` network;
+- the correct Traefik service port and TLS labels; and
+- tailnet grants that permit the client to reach the ingress ports.
+
+Starting, stopping, or renaming an ordinary application container needs no DNS
+restart because the wildcard answer is unchanged. Traefik notices the Docker
+event and adds or removes the router dynamically. Direct `*.dkr.tail.gg` names
+are different: they exist only when a container explicitly owns the complete
+name as a `tailscale_services` network alias, and Docker's embedded DNS supplies
+that exact record dynamically.
+
+Ordinary synthesized A answers have a 60-second TTL. Direct answers pass
+through CoreDNS's 30-second cache. Clients may therefore retain a recently
+changed answer until its TTL expires even after the container or router changes.
+
+At CoreDNS startup, its entrypoint resolves the `traefik.docker.local` network
+alias and renders that IP into the wildcard response. The rendered answer is
+fixed for that CoreDNS process. If Traefik is recreated and receives a different
+Docker IP, restart or recreate CoreDNS afterward. If certificate issuance was
+attempted while the old IP was still served, restart Traefik in place after
+CoreDNS is healthy so ACME retries the challenge. `task up:full` handles the
+normal full-stack recreation order; prefer it over plain `task up` while the
+Tailscale profile is active.
+
 Tailscale routes packets to IP ranges; it does not route hostnames. CoreDNS is
 what decides whether a name maps to the Traefik address class or directly to a
 container address. The connector must therefore advertise both ranges:
