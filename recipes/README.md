@@ -50,7 +50,7 @@ Recipes assume that you have already:
 1. Started the main stack with Tailscale and CoreDNS:
 
    ```bash
-   task up:full
+   docker compose up -d
    ```
 
 2. Configured `tail.gg` split DNS and approved the advertised subnet routes as

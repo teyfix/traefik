@@ -14,6 +14,11 @@ services:
     container_name: traefik_stepca_init
     image: smallstep/step-ca:${STEPCA_VER?:}
     restart: no
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     entrypoint: /bin/bash
     command: /entrypoint.sh
     environment:
@@ -28,6 +33,11 @@ services:
     container_name: traefik_stepca
     image: smallstep/step-ca:${STEPCA_VER?:}
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
     environment:
       - DOCKER_STEPCA_INIT_NAME
       - DOCKER_STEPCA_INIT_DNS_NAMES
@@ -49,6 +59,11 @@ services:
     image: traefik:${TRAEFIK_VER?:}
     command: --configFile=/etc/traefik/traefik-static.yaml
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
     networks:
       proxy:
         aliases:

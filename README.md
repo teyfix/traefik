@@ -64,32 +64,22 @@ Complete the one-time tailnet policy, route-approval, DNS, and auth-key setup in
 [`compose/tailscale/README.md`](compose/tailscale/README.md). Put `TS_AUTHKEY`
 only in the documented gitignored local environment file; never commit it.
 
-### 3. Render and start the base environment
+### 3. Render and start the environment
 
 ```bash
 docker compose config
-task up
+docker compose up -d
 ```
 
 This will:
 
-- Start Step CA, Traefik, and observability services
+- Start Step CA, Traefik, Tailscale, CoreDNS, and observability services
 - Wait until Step CA is healthy
 - Allow Traefik to request certificates using ACME
 - Create stable external networks for application projects
 
-Tailscale and CoreDNS are deliberately behind the `tailscale` profile. After
-the tailnet administration and local auth-key setup are complete, render and
-start the full stack with:
-
-```bash
-docker compose --profile tailscale config
-task up:full
-```
-
-`task up:full` starts or recreates the base dependencies as well as Tailscale
-and CoreDNS. The equivalent raw start command is
-`docker compose --profile tailscale up -d`.
+The equivalent Task command is `task up`. Complete the tailnet administration
+and local auth-key setup before the first start so Tailscale can register.
 
 ### 4. Trust the root CA (Linux)
 
@@ -230,17 +220,15 @@ services:
 
 ## 🛠 Available Tasks
 
-| Task                 | Description                                                   |
-| -------------------- | ------------------------------------------------------------- |
-| `task up`            | Start/recreate base services without stopping Tailscale       |
-| `task up:full`       | Start/recreate base, Tailscale, and CoreDNS services          |
-| `task down`          | Stop both profiles while preserving persistent state          |
-| `task recreate`      | Recreate base services without stopping Tailscale             |
-| `task recreate:full` | Stop and recreate both profiles                               |
-| `task logs`          | Follow logs of all containers                                 |
-| `task certs`         | Export certificates from Step CA                              |
-| `task certs:install` | Install the root CA into your Linux trust store               |
-| `task purge`         | Stop both profiles and remove CA, ACME, and Tailscale state    |
+| Task                 | Description                                                 |
+| -------------------- | ----------------------------------------------------------- |
+| `task up`            | Start or recreate all services                              |
+| `task down`          | Stop all services while preserving persistent state         |
+| `task recreate`      | Recreate all services                                        |
+| `task logs`          | Follow logs of all containers                               |
+| `task certs`         | Export certificates from Step CA                            |
+| `task certs:install` | Install the root CA into your Linux trust store             |
+| `task purge`         | Stop all services and remove CA, ACME, and Tailscale state  |
 
 ---
 

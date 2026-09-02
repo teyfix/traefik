@@ -18,7 +18,7 @@ not publish any host ports.
 From this directory:
 
 ```bash
-docker compose --profile direct up -d
+docker compose up -d
 ```
 
 The `hello` container joins `tailscale_services` with the exact network alias
@@ -36,7 +36,7 @@ authentication on this path.
 Remove the disposable container when finished:
 
 ```bash
-docker compose --profile direct down
+docker compose down
 ```
 
 To adapt the recipe, use an alias in the form

@@ -8,8 +8,6 @@ networks:
 services:
   hello:
     image: traefik/whoami:v1.11.0
-    profiles:
-      - direct
     networks:
       tailscale_services:
         aliases:

@@ -76,9 +76,8 @@ alias and renders that IP into the wildcard response. The rendered answer is
 fixed for that CoreDNS process. If Traefik is recreated and receives a different
 Docker IP, restart or recreate CoreDNS afterward. If certificate issuance was
 attempted while the old IP was still served, restart Traefik in place after
-CoreDNS is healthy so ACME retries the challenge. `task up:full` handles the
-normal full-stack recreation order; prefer it over plain `task up` while the
-Tailscale profile is active.
+CoreDNS is healthy so ACME retries the challenge. `docker compose up -d` starts
+the complete stack and respects the declared dependency order.
 
 Tailscale routes packets to IP ranges; it does not route hostnames. CoreDNS is
 what decides whether a name maps to the Traefik address class or directly to a
@@ -216,20 +215,17 @@ registration or after deliberately deleting that state.
 From the repository root, review the committed `.env`, copy
 `env/.env.tailscale.example` to the gitignored
 `env/.env.tailscale.local`, and replace its placeholder. Then render and start
-the stack with the profile enabled:
+the stack:
 
 ```bash
 cp env/.env.tailscale.example env/.env.tailscale.local
-docker compose --profile tailscale config
-task up:full
+docker compose config
+docker compose up -d
 ```
 
-`task up:full` starts the unprofiled edge/observability services and the
-profiled Tailscale/CoreDNS services together. Its raw Compose equivalent is
-`docker compose --profile tailscale up -d`. Plain `task up` intentionally
-starts or recreates only the base services and does not stop an already-running
-Tailscale profile. Use `task recreate:full` to stop and recreate both profiles,
-or `task down` to stop both while preserving their volumes.
+This starts the edge, observability, Tailscale, and CoreDNS services together.
+The equivalent Task command is `task up`; use `task down` to stop the complete
+stack while preserving its volumes.
 
 Verify from a different tailnet device, not only from the Docker host:
 
