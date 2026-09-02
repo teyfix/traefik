@@ -12,8 +12,6 @@ services:
   tailscale:
     container_name: traefik_tailscale
     image: ${TAILSCALE_IMAGE:?}
-    profiles:
-      - tailscale
     restart: unless-stopped
     environment:
       TS_AUTH_ONCE: "true"
@@ -52,8 +50,6 @@ services:
 
   coredns:
     container_name: traefik_coredns
-    profiles:
-      - tailscale
     build:
       context: ${PWD}/compose/tailscale/coredns
       dockerfile_inline: |-
