@@ -90,6 +90,7 @@ TS_SERVICE_SUBNET=10.10.10.0/24
 TS_ROUTES=10.10.10.0/24,172.16.0.0/12
 TS_DNS_SERVER=10.10.10.10
 TS_HOSTNAME=docker-subnet-router
+TS_FORWARD_MSS=1160
 ```
 
 - `10.10.10.0/24` contains CoreDNS and containers explicitly attached for
@@ -111,6 +112,39 @@ ordinary `tail.gg` wildcard.
 > networks. An overlapping client may select the wrong route. If that happens,
 > coordinate a narrower, non-overlapping Docker address pool before changing
 > the advertised route.
+
+## WSL NAT and forwarded TCP MSS
+
+On the default WSL NAT backend, Windows can set WSL's `eth0` MTU to the
+smallest connected Windows interface MTU. With Windows Tailscale active, both
+that adapter and WSL `eth0` can be `1280`. The container's own `tailscale0`
+interface is also `1280`, so a full forwarded IPv4 packet plus its outer
+WireGuard, UDP, and IP overhead does not fit through WSL `eth0` without outer
+fragmentation.
+
+[Tailscale recommends MSS clamping for subnet routers](https://tailscale.com/docs/features/site-to-site#clamp-the-mss-to-the-mtu),
+but its generic `--clamp-mss-to-pmtu` example only sees the `1280` MTU of
+`tailscale0`. It therefore permits an MSS of `1240` and cannot account for the
+outer Tailscale encapsulation crossing WSL's separate `1280`-byte link. On the
+affected Windows/WSL path, DF probes found a maximum inner IPv4 packet size of
+`1216` bytes. `TS_FORWARD_MSS=1160` leaves 56 bytes for IPv4/TCP headers and
+options and was verified with a 957607-byte HTTPS response.
+
+The Tailscale entrypoint installs two tagged `TCPMSS --set-mss` rules for
+forwarded TCP SYN packets: one entering and one leaving `tailscale0`. It only
+reduces advertised values above `1160`, stays inside the connector's network
+namespace, and does not change WSL or Docker network MTUs. Because the rules
+are installed by the entrypoint, a connector recreation or restart restores
+them automatically. Inspect matches with:
+
+```bash
+docker exec traefik_tailscale \
+  iptables -t mangle -nvL FORWARD --line-numbers
+```
+
+To roll back, revert the entrypoint, its bind mount, and `TS_FORWARD_MSS`, then
+run `docker compose up -d --force-recreate tailscale`. Recreating the connector
+also removes the rules from the old container network namespace.
 
 ## Ownership boundary
 
