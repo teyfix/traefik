@@ -99,13 +99,17 @@ This repository used to track root `.env`. The migration that introduces
 unmodified local `.env` when pulling the change. Preserve it before updating:
 
 ```bash
-cp .env .env.before-example-env-migration
+mkdir -p .local
+cp --backup=numbered .env .local/.env.before-example-env-migration
 ```
+
+GNU `cp --backup=numbered` preserves any backup already at that path as a
+numbered sibling before writing the current `.env`.
 
 After updating, restore the file if Git removed it:
 
 ```bash
-test -f .env || cp .env.before-example-env-migration .env
+test -f .env || cp .local/.env.before-example-env-migration .env
 docker compose config --quiet
 ```
 
@@ -349,7 +353,7 @@ Traefik publishes ports `80`, `443`, `8080`, and `4040` only on
 `127.0.0.1`. Host-local clients can still use those published ports, while
 ordinary LAN clients cannot reach them through a host interface. Tailnet
 clients instead reach Traefik's Docker address through the approved
-approved subnet route. This boundary depends on restrictive Tailscale grants:
+subnet route. This boundary depends on restrictive Tailscale grants:
 private DNS names are service discovery, not authorization.
 
 Certificate validation additionally uses this configuration:
