@@ -27,13 +27,13 @@ With the default environment configuration:
 
 ```env
 TRAEFIK_SERVICE_PREFIX=recipe
-TRAEFIK_BASE_DOMAIN=recipe.tail.gg
+TRAEFIK_BASE_DOMAIN=recipe.dev.example.test
 ```
 
 The following endpoints are available:
 
-- **S3 API** `https://s3.recipe.tail.gg`
-- **MinIO Console** `https://minio.recipe.tail.gg`
+- **S3 API** `https://s3.recipe.dev.example.test`
+- **MinIO Console** `https://minio.recipe.dev.example.test`
 
 Both endpoints are served over HTTPS with certificates issued by the local Step
 CA through Traefik.
@@ -49,7 +49,7 @@ values are missing.
 
 ```env
 TRAEFIK_SERVICE_PREFIX=recipe
-TRAEFIK_BASE_DOMAIN=recipe.tail.gg
+TRAEFIK_BASE_DOMAIN=recipe.dev.example.test
 TRAEFIK_ACME_RESOLVER=stepca
 TRAEFIK_HTTPS_ENTRYPOINT=websecure
 ```

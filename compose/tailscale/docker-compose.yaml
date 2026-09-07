@@ -26,6 +26,8 @@ services:
     env_file:
       - path: ${PWD}/env/.env.tailscale.local
         required: false
+      - path: ${PWD}/.env
+        required: false
     volumes:
       - tailscale:/var/lib/tailscale
       - ${PWD}/compose/tailscale/entrypoint.sh:/usr/local/bin/tailscale-entrypoint.sh:ro

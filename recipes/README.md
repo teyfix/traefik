@@ -53,7 +53,7 @@ Recipes assume that you have already:
    docker compose up -d
    ```
 
-2. Configured `tail.gg` split DNS and approved the advertised subnet routes as
+2. Configured split DNS and approved the advertised subnet routes as
    documented in [`compose/tailscale/README.md`](../compose/tailscale/README.md)
 
 3. Trusted the local root CA on your machine
@@ -76,13 +76,13 @@ fail**.
 All recipes use the same domain pattern:
 
 ```txt
-<service>.<prefix>.tail.gg
+<service>.<prefix>.<TAIL_DOMAIN>
 ```
 
 For example:
 
-- `pg.teyfix.tail.gg`
-- `pgadmin.teyfix.tail.gg`
+- `pg.project.dev.example.test`
+- `pgadmin.project.dev.example.test`
 
 Certificates are:
 
@@ -141,7 +141,7 @@ and `pgadmin.<base-domain>` to keep domains consistent and predictable.
 **Example:**
 
 ```env
-TRAEFIK_BASE_DOMAIN=teyfix.tail.gg
+TRAEFIK_BASE_DOMAIN=project.dev.example.test
 ```
 
 ---

@@ -6,8 +6,9 @@ This repository provides reusable development ingress for multiple projects:
   `traefik_proxy` Docker network
 - [Smallstep Step CA](https://smallstep.com/docs/step-ca/) certificates issued
   to Traefik through ACME
-- a persistent Tailscale subnet router and CoreDNS split DNS for `tail.gg`
-- private `tail.gg` service names routed through the shared Traefik ingress
+- a persistent Tailscale subnet router and CoreDNS split DNS for an
+  administrator-approved private suffix
+- private service names routed through the shared Traefik ingress
 - optional, self-contained service recipes
 
 Projects keep ownership of their application containers and Traefik labels.
@@ -79,20 +80,44 @@ with the current Tailnet administrator. Existing DNS zones, route owners, and
 the target machine's subnets determine the setup. Do not copy these values to
 another host until that conflict check is complete.
 
-Set the approved non-secret network values through the selected installation's
-environment configuration. This installation's checked-in defaults are:
+Copy the example environment and replace its placeholders with the approved
+non-secret network values and first-registration auth key for this installation:
 
-```env
-TAIL_DOMAIN=tail.gg
-DIRECT_DOMAIN=dkr.tail.gg
-TS_SERVICE_SUBNET=10.10.10.0/24
-TS_DNS_SERVER=10.10.10.10
-TS_ROUTES=10.10.10.0/24,172.16.0.0/12
+```bash
+cp .example.env .env
+$EDITOR .env
 ```
 
 Complete the one-time tailnet policy, route-approval, DNS, and auth-key setup in
 [`compose/tailscale/README.md`](compose/tailscale/README.md). Put `TS_AUTHKEY`
 only in the documented gitignored local environment file; never commit it.
+
+### Existing checkout migration
+
+This repository used to track root `.env`. The migration that introduces
+`.example.env` removes `.env` from Git, so an existing checkout can lose an
+unmodified local `.env` when pulling the change. Preserve it before updating:
+
+```bash
+mkdir -p .local
+cp --backup=numbered .env .local/.env.before-example-env-migration
+```
+
+GNU `cp --backup=numbered` preserves any backup already at that path as a
+numbered sibling before writing the current `.env`.
+
+After updating, restore the file if Git removed it:
+
+```bash
+test -f .env || cp .local/.env.before-example-env-migration .env
+docker compose config --quiet
+```
+
+Keep the restored `.env` local and ignored. If `TS_AUTHKEY` was stored in the
+legacy `env/.env.tailscale.local` file, either leave that file in place for
+compatibility or move the `TS_AUTHKEY` line into root `.env`. The persistent
+Tailscale state volume normally means the key is needed only for first
+registration or after deliberately deleting connector state.
 
 ### 3. Render and start the environment
 
@@ -151,17 +176,19 @@ Then follow these steps to install the certificate:
 8. A final prompt will confirm the installation — click **Yes**.
 
 > 🛡️ You should now be able to visit services like
-> `https://traefik.tail.gg` in your browser without any certificate
+> your configured Traefik hostname in your browser without any certificate
 > warnings.
 
 ### 6. Attach an application project
 
 For the normal HTTPS path, attach a service to `traefik_proxy` and keep its
-project-owned Traefik labels. A host such as `api.ukiyo.tail.gg` resolves to
-Traefik, which then selects the project router.
+project-owned Traefik labels. A host such as
+`api.project.dev.example.test` resolves to Traefik, which then selects the
+project router.
 
 Direct container access is opt-in and uses an exact alias such as
-`hello.ukiyo.dkr.tail.gg` on the external `tailscale_services` network. It
+`hello.project.dkr.dev.example.test` on the external `tailscale_services`
+network. It
 bypasses Traefik security and TLS. See the
 [`tailscale-direct` recipe](recipes/tailscale-direct/README.md) before using
 that path.
@@ -182,18 +209,18 @@ services:
     image: teyfix/timescaledb-pgrx:latest
     labels:
       - "traefik.enable=true"
-      - "traefik.tcp.routers.teyfix_pg.rule=HostSNI(`pg.teyfix.tail.gg`)"
-      - "traefik.tcp.routers.teyfix_pg.entrypoints=shared"
-      - "traefik.tcp.routers.teyfix_pg.service=teyfix_pg"
-      - "traefik.tcp.routers.teyfix_pg.tls=true"
-      - "traefik.tcp.routers.teyfix_pg.tls.certresolver=stepca"
-      - "traefik.tcp.services.teyfix_pg.loadbalancer.server.port=5432"
+      - "traefik.tcp.routers.project_pg.rule=HostSNI(`pg.project.dev.example.test`)"
+      - "traefik.tcp.routers.project_pg.entrypoints=shared"
+      - "traefik.tcp.routers.project_pg.service=project_pg"
+      - "traefik.tcp.routers.project_pg.tls=true"
+      - "traefik.tcp.routers.project_pg.tls.certresolver=stepca"
+      - "traefik.tcp.services.project_pg.loadbalancer.server.port=5432"
     networks:
       - traefik_proxy
 ```
 
 You can now securely connect to PostgreSQL at
-`pg.teyfix.tail.gg:4040` with TLS.
+`pg.project.dev.example.test:4040` with TLS.
 
 > [!NOTE]  
 > Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's
@@ -225,26 +252,26 @@ services:
       - "traefik.enable=true"
 
       # MinIO API
-      - "traefik.http.routers.teyfix_minio_api.rule=Host(`minio-api.teyfix.tail.gg`)"
-      - "traefik.http.routers.teyfix_minio_api.tls=true"
-      - "traefik.http.routers.teyfix_minio_api.entrypoints=websecure"
-      - "traefik.http.routers.teyfix_minio_api.tls.certresolver=stepca"
-      - "traefik.http.routers.teyfix_minio_api.service=teyfix_minio_api"
-      - "traefik.http.services.teyfix_minio_api.loadbalancer.server.port=9000"
+      - "traefik.http.routers.project_minio_api.rule=Host(`minio-api.project.dev.example.test`)"
+      - "traefik.http.routers.project_minio_api.tls=true"
+      - "traefik.http.routers.project_minio_api.entrypoints=websecure"
+      - "traefik.http.routers.project_minio_api.tls.certresolver=stepca"
+      - "traefik.http.routers.project_minio_api.service=project_minio_api"
+      - "traefik.http.services.project_minio_api.loadbalancer.server.port=9000"
 
       # MinIO Console
-      - "traefik.http.routers.teyfix_minio_console.rule=Host(`minio-console.teyfix.tail.gg`)"
-      - "traefik.http.routers.teyfix_minio_console.tls=true"
-      - "traefik.http.routers.teyfix_minio_console.entrypoints=websecure"
-      - "traefik.http.routers.teyfix_minio_console.tls.certresolver=stepca"
-      - "traefik.http.routers.teyfix_minio_console.service=teyfix_minio_console"
-      - "traefik.http.services.teyfix_minio_console.loadbalancer.server.port=9001"
+      - "traefik.http.routers.project_minio_console.rule=Host(`minio-console.project.dev.example.test`)"
+      - "traefik.http.routers.project_minio_console.tls=true"
+      - "traefik.http.routers.project_minio_console.entrypoints=websecure"
+      - "traefik.http.routers.project_minio_console.tls.certresolver=stepca"
+      - "traefik.http.routers.project_minio_console.service=project_minio_console"
+      - "traefik.http.services.project_minio_console.loadbalancer.server.port=9001"
 ```
 
 ✅ Once running, you can securely access:
 
-- `https://minio-api.teyfix.tail.gg` for the API
-- `https://minio-console.teyfix.tail.gg` for the web console
+- `https://minio-api.project.dev.example.test` for the API
+- `https://minio-console.project.dev.example.test` for the web console
 
 ---
 
@@ -276,7 +303,7 @@ another project checkout.
 
 Once up, you can access the Traefik dashboard via either:
 
-- **HTTPS (recommended)**: `https://traefik.tail.gg`
+- **HTTPS (recommended)**: your configured Traefik hostname
 - **HTTP (insecure)**: `http://localhost:8080`
 
 > [!TIP]  
@@ -311,23 +338,23 @@ https://localhost:9000
 
 This stack exposes application services through two distinct paths:
 
-- Ordinary names such as `api.ukiyo.tail.gg` resolve through CoreDNS at
-  `10.10.10.10` to Traefik's Docker address. The project service only needs the
-  `traefik_proxy` network and its own labels.
-- Names under `dkr.tail.gg`, such as `hello.ukiyo.dkr.tail.gg`, resolve through
+- Ordinary names such as `api.project.dev.example.test` resolve through
+  CoreDNS at the configured `TS_DNS_SERVER` to Traefik's Docker address. The
+  project service only needs the `traefik_proxy` network and its own labels.
+- Direct names such as `hello.project.dkr.dev.example.test` resolve through
   Docker embedded DNS to the exact alias of a container explicitly joined to
   `tailscale_services`.
 
 Tailscale routes the returned IP, not the hostname. CoreDNS selects the
-destination address class. The subnet router advertises `10.10.10.0/24` for
-CoreDNS/direct containers and `172.16.0.0/12` for Docker/Traefik.
+destination address class. The subnet router advertises the configured service
+subnet for CoreDNS/direct containers and the approved Docker/Traefik route.
 
 Traefik publishes ports `80`, `443`, `8080`, and `4040` only on
 `127.0.0.1`. Host-local clients can still use those published ports, while
 ordinary LAN clients cannot reach them through a host interface. Tailnet
 clients instead reach Traefik's Docker address through the approved
-`172.16.0.0/12` subnet route. This boundary depends on restrictive Tailscale
-grants: private `tail.gg` DNS names are service discovery, not authorization.
+subnet route. This boundary depends on restrictive Tailscale grants:
+private DNS names are service discovery, not authorization.
 
 Certificate validation additionally uses this configuration:
 
@@ -355,11 +382,11 @@ migration contract is documented in
 - Browsers may still show a warning unless root CA is manually trusted
 - Host-published Traefik ports are loopback-only; tailnet access uses the
   routed Docker address and must be restricted with Tailscale grants
-- Private `tail.gg` DNS records do not authorize access or replace application
+- Private DNS records do not authorize access or replace application
   authentication for sensitive services
-- Direct `*.dkr.tail.gg` exposure bypasses Traefik TLS, middleware, and auth
-- `172.16.0.0/12` routing can overlap client LAN, VPN, or Docker networks
-- Tailnet split DNS for `tail.gg` shadows public records under the same suffix
+- Direct exposure bypasses Traefik TLS, middleware, and auth
+- Broad Docker routing can overlap client LAN, VPN, or Docker networks
+- Tailnet split DNS shadows public records under the same suffix
 
 Using an owned suffix provides stable OAuth callback names, but providers such
 as Google still require the configured domain, HTTPS rules, and redirect URI to
