@@ -2,29 +2,29 @@
 
 Before onboarding a machine or choosing a suffix, complete the
 [dynamic setup questionnaire](ONBOARDING.md). The addresses and suffixes below
-describe this installation; they are not an allocation for a new router.
+are examples; they are not an allocation for a new router.
 
 This Compose component makes development services reachable from authorized
-tailnet devices under the private `tail.gg` DNS suffix. It owns the persistent
+tailnet devices under the configured private DNS suffix. It owns the persistent
 Tailscale subnet-router identity, CoreDNS, and the shared
 `tailscale_services` Docker network. Application projects continue to own their
 containers and routes.
 
 ## Request and DNS flow
 
-Every tailnet client sends queries for `tail.gg` to CoreDNS at
-`10.10.10.10`. CoreDNS then selects one of two exposure paths:
+Every tailnet client sends queries for the configured private suffix to
+CoreDNS at `TS_DNS_SERVER`. CoreDNS then selects one of two exposure paths:
 
 ```text
-ordinary name, for example api.ukiyo.tail.gg
-  -> CoreDNS returns Traefik's 172.16.0.0/12 address
+ordinary name, for example api.project.dev.example.test
+  -> CoreDNS returns Traefik's Docker-network address
   -> tailnet subnet router
   -> Traefik TLS/router/middleware
   -> project service on traefik_proxy
 
-direct name, for example hello.ukiyo.dkr.tail.gg
+direct name, for example hello.project.dkr.dev.example.test
   -> CoreDNS asks Docker's embedded DNS for the exact network alias
-  -> CoreDNS returns that container's 10.10.10.0/24 address
+  -> CoreDNS returns that container's service-subnet address
   -> tailnet subnet router
   -> container's native port and protocol
 ```
@@ -34,42 +34,43 @@ direct name, for example hello.ukiyo.dkr.tail.gg
 There is no per-service DNS record synchronization with Tailscale. The DNS and
 service-discovery layers are independent and meet at the requested hostname:
 
-1. The Tailscale admin console delegates the `tail.gg` suffix to the restricted
-   nameserver at `10.10.10.10`. It does not contain records for application
-   services.
-2. A tailnet client's local Tailscale resolver sends every `tail.gg` query to
-   that CoreDNS address through the advertised `10.10.10.0/24` subnet route.
+1. The Tailscale admin console delegates the configured private suffix to the
+   restricted nameserver at `TS_DNS_SERVER`. It does not contain records for
+   application services.
+2. A tailnet client's local Tailscale resolver sends every private-suffix query
+   to that CoreDNS address through the advertised service subnet route.
 3. For an ordinary name, CoreDNS synthesizes an A record containing Traefik's
    Docker IP. The wildcard covers the apex and every subdomain, so adding
-   `api.project.tail.gg` does not require a CoreDNS edit or a record in the
+   `api.project.dev.example.test` does not require a CoreDNS edit or a record in the
    Tailscale admin console.
 4. Independently, Traefik watches the Docker socket. When a running container
    on `traefik_proxy` has enabled labels, Traefik creates the declared router
    and maps its `Host(...)` or `HostSNI(...)` rule to that container and port.
 5. The client connects to the synthesized IP through the advertised
-   `172.16.0.0/12` route. Traefik selects the router by the original HTTP Host
+   Docker/Traefik route. Traefik selects the router by the original HTTP Host
    header or TLS SNI name and requests a matching certificate from Step CA.
 
 CoreDNS therefore does not discover containers, inspect Traefik labels, or
-store a list of ordinary services. It deliberately answers all ordinary
-`*.tail.gg` names with the same Traefik IP. A name can resolve successfully
-even when no matching router exists; in that case Traefik returns its unmatched
-route response and may present its default certificate. DNS resolution proves
+store a list of ordinary services. It deliberately answers all ordinary names
+with the same Traefik IP. A name can resolve successfully even when no matching
+router exists; in that case Traefik returns its unmatched route response and
+may present its default certificate. Trusting the Step CA root cannot validate
+that unrelated default leaf for the requested hostname. DNS resolution proves
 only that the shared ingress is discoverable, not that an application exists.
 
 Adding a normal HTTPS service requires only:
 
-- a unique `*.tail.gg` hostname in its Traefik router label;
+- a unique hostname under the configured private suffix in its Traefik router label;
 - membership in the external `traefik_proxy` network;
 - the correct Traefik service port and TLS labels; and
 - tailnet grants that permit the client to reach the ingress ports.
 
 Starting, stopping, or renaming an ordinary application container needs no DNS
 restart because the wildcard answer is unchanged. Traefik notices the Docker
-event and adds or removes the router dynamically. Direct `*.dkr.tail.gg` names
-are different: they exist only when a container explicitly owns the complete
-name as a `tailscale_services` network alias, and Docker's embedded DNS supplies
-that exact record dynamically.
+event and adds or removes the router dynamically. Direct names under
+`DIRECT_DOMAIN` are different: they exist only when a container explicitly owns
+the complete name as a `tailscale_services` network alias, and Docker's
+embedded DNS supplies that exact record dynamically.
 
 Ordinary synthesized A answers have a 60-second TTL. Direct answers pass
 through CoreDNS's 30-second cache. Clients may therefore retain a recently
@@ -88,8 +89,8 @@ what decides whether a name maps to the Traefik address class or directly to a
 container address. The connector must therefore advertise both ranges:
 
 ```env
-TAIL_DOMAIN=tail.gg
-DIRECT_DOMAIN=dkr.tail.gg
+TAIL_DOMAIN=dev.example.test
+DIRECT_DOMAIN=dkr.dev.example.test
 TS_SERVICE_SUBNET=10.10.10.0/24
 TS_ROUTES=10.10.10.0/24,172.16.0.0/12
 TS_DNS_SERVER=10.10.10.10
@@ -97,22 +98,23 @@ TS_HOSTNAME=docker-subnet-router
 TS_FORWARD_MSS=1160
 ```
 
-- `10.10.10.0/24` contains CoreDNS and containers explicitly attached for
+- `TS_SERVICE_SUBNET` contains CoreDNS and containers explicitly attached for
   direct access.
-- `172.16.0.0/12` covers Docker/Traefik addresses used by normal routed names.
+- The additional route covers Docker/Traefik addresses used by normal routed
+  names.
 
 Traefik's host-published ports bind only to `127.0.0.1`, so they are available
 to host-local clients but not through ordinary host LAN interfaces. Tailnet
-clients use the advertised `172.16.0.0/12` route to reach Traefik's Docker
+clients use the advertised Docker/Traefik route to reach Traefik's Docker
 address directly; they do not depend on those host port publications.
 
 `TS_SERVICE_SUBNET` configures the dedicated `tailscale_services` bridge. It is
-not Docker's general address range and does not replace the `172.16.0.0/12`
-route. CoreDNS gives the more-specific `dkr.tail.gg` zone precedence over the
-ordinary `tail.gg` wildcard.
+not Docker's general address range and does not replace the Docker/Traefik
+route. CoreDNS gives the more-specific `DIRECT_DOMAIN` zone precedence over the
+ordinary `TAIL_DOMAIN` wildcard.
 
 > [!WARNING]
-> `172.16.0.0/12` can overlap a tailnet client's LAN, VPN, or local Docker
+> Broad Docker routes can overlap a tailnet client's LAN, VPN, or local Docker
 > networks. An overlapping client may select the wrong route. If that happens,
 > coordinate a narrower, non-overlapping Docker address pool before changing
 > the advertised route.
@@ -156,7 +158,7 @@ This repository owns:
 
 - Traefik and Step CA
 - the persistent Tailscale connector and its state
-- CoreDNS and split-DNS behavior for `tail.gg`
+- CoreDNS and split-DNS behavior for the configured private suffix
 - the shared `traefik_proxy` and `tailscale_services` networks
 
 Each application project owns:
@@ -174,9 +176,10 @@ Traefik labels and any workload-specific sidecars.
 
 Configure policy in the
 [Tailscale policy editor](https://login.tailscale.com/admin/acls) before
-starting the connector. The following policy fragments
-show the intended relationship; merge them into the tailnet's existing policy
-instead of replacing it. Substitute the actual group allowed to own the
+starting the connector. The following policy fragment shows the intended
+relationship for the example CIDRs in `.example.env`; replace them with the
+actual approved routes and merge the fragment into the tailnet's existing
+policy instead of replacing it. Substitute the actual group allowed to own the
 connector if `autogroup:admin` is too broad.
 
 ```json
@@ -197,26 +200,26 @@ ranges on any IP protocol:
 ```
 
 Prefer narrower groups and ports where practical. A narrowed policy must still
-permit TCP and UDP port 53 to `10.10.10.10`, plus each intended Traefik or
-direct-service destination port.
+permit TCP and UDP port 53 to the configured `TS_DNS_SERVER`, plus each
+intended Traefik or direct-service destination port.
 
 Private split DNS is not an access-control boundary. Knowing or resolving a
-`tail.gg` name does not authorize a client; Tailscale grants must restrict the
+private name does not authorize a client; Tailscale grants must restrict the
 routed address and port, and sensitive applications still need appropriate
 application-level authentication.
 
 In the [Tailscale DNS administration page](https://login.tailscale.com/admin/dns):
 
 1. Enable MagicDNS.
-2. Add `10.10.10.10` as a nameserver.
-3. Restrict that nameserver to the `tail.gg` domain.
+2. Add the configured `TS_DNS_SERVER` address as a nameserver.
+3. Restrict that nameserver to the configured `TAIL_DOMAIN`.
 
 MagicDNS and the restricted nameserver are separate settings. MagicDNS handles
 tailnet device names; the restricted nameserver makes CoreDNS authoritative for
 this private development suffix.
 
 > [!CAUTION]
-> Split DNS for `tail.gg` shadows public `tail.gg` records on tailnet clients.
+> Split DNS shadows public records under the same suffix on tailnet clients.
 > Reserve the suffix for this development fabric, or change CoreDNS to serve
 > only explicit private zones and forward unmatched names publicly.
 
@@ -228,20 +231,22 @@ with these properties:
 - non-ephemeral, because this connector has a persistent identity
 - reusable disabled (a one-off key)
 
-Store it as `TS_AUTHKEY` in the gitignored local environment file described by
-the root example configuration. Do not commit the key. The connector's Docker
-volume preserves its identity, so the key is normally needed only for initial
-registration or after deliberately deleting that state.
+Store it as `TS_AUTHKEY` in the gitignored root `.env` copied from
+`.example.env`. The legacy `env/.env.tailscale.local` file is still read for
+existing installations; keep only one current key source to avoid confusion.
+Do not commit the key. The connector's Docker volume preserves its identity, so
+the key is normally needed only for initial registration or after deliberately
+deleting that state.
 
 ## Start and verify
 
-From the repository root, review the committed `.env`, copy
-`env/.env.tailscale.example` to the gitignored
-`env/.env.tailscale.local`, and replace its placeholder. Then render and start
-the stack:
+From the repository root, copy `.example.env` to the gitignored `.env` and
+replace every placeholder with the approved values for this installation. Then
+render and start the stack:
 
 ```bash
-cp env/.env.tailscale.example env/.env.tailscale.local
+cp .example.env .env
+$EDITOR .env
 docker compose config
 docker compose up -d
 ```
@@ -252,9 +257,9 @@ stack while preserving its volumes.
 
 Verify from a different tailnet device, not only from the Docker host:
 
-1. `api.ukiyo.tail.gg` resolves to a `172.16.0.0/12` Traefik address.
+1. The service hostname resolves to the intended Traefik address.
 2. HTTPS reaches the matching project router after the Step CA root is trusted.
-3. A direct recipe name resolves to a `10.10.10.0/24` container address and is
+3. A direct recipe name resolves to a service-subnet container address and is
    reachable on the container's native port.
 4. The connector advertises both configured routes and the routes are enabled.
 
@@ -278,11 +283,11 @@ services:
       - traefik_proxy
     labels:
       - traefik.enable=true
-      - traefik.http.routers.ukiyo_api.rule=Host(`api.ukiyo.tail.gg`)
-      - traefik.http.routers.ukiyo_api.entrypoints=websecure
-      - traefik.http.routers.ukiyo_api.tls=true
-      - traefik.http.routers.ukiyo_api.tls.certresolver=stepca
-      - traefik.http.services.ukiyo_api.loadbalancer.server.port=8080
+      - traefik.http.routers.project_api.rule=Host(`api.project.dev.example.test`)
+      - traefik.http.routers.project_api.entrypoints=websecure
+      - traefik.http.routers.project_api.tls=true
+      - traefik.http.routers.project_api.tls.certresolver=stepca
+      - traefik.http.services.project_api.loadbalancer.server.port=8080
 ```
 
 The project service does not join `tailscale_services` for this path. Traefik
@@ -305,16 +310,16 @@ services:
     networks:
       tailscale_services:
         aliases:
-          - hello.ukiyo.dkr.tail.gg
+          - hello.project.dkr.dev.example.test
 ```
 
-Use the convention `<service>.<project>.dkr.tail.gg`. A `hostname:` value is
+Use the convention `<service>.<project>.<DIRECT_DOMAIN>`. A `hostname:` value is
 optional; the network alias is the discovery contract used by Docker's embedded
 DNS. Do not attach a container merely because it already has a Traefik route.
 
 > [!NOTE]
-> Direct names must match a network alias exactly. An unknown `*.dkr.tail.gg`
-> name never falls back to Traefik; Docker embedded DNS may return no answer or,
+> Direct names must match a network alias exactly. An unknown direct name
+> never falls back to Traefik; Docker embedded DNS may return no answer or,
 > in some WSL environments, let the lookup time out instead of returning
 > `NXDOMAIN`.
 
@@ -329,7 +334,7 @@ the central Compose model.
 
 ## OAuth and certificate trust
 
-Using an owned domain such as `tail.gg` provides readable, stable redirect URIs
+Using an owned domain provides readable, stable redirect URIs
 for providers such as Google. Configure the provider with the owned domain,
 HTTPS where required, and a redirect URI that exactly matches scheme, host,
 port, path, and trailing-slash behavior.

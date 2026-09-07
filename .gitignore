@@ -1,5 +1,6 @@
 certs
 stepca
+/.env
 /env/.env.tailscale.local
 /.local/
 /node_modules/

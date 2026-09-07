@@ -11,4 +11,4 @@ services:
     networks:
       tailscale_services:
         aliases:
-          - hello.smoke.dkr.tail.gg
+          - hello.smoke.dkr.dev.example.test
