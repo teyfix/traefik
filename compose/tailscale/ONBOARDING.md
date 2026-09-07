@@ -27,7 +27,7 @@ existing Tailnet for every contributor.
 
 |Input|Administrator supplies|
 |-|-|
-|Target|Machine/router identity and whether this is application contribution, worker registration, or new ingress.|
+|Target|Machine identity and whether this is access-only contribution, personal Scion, an additional shared-Hub worker, or independent ingress.|
 |Names|Requested suffix, existing shared endpoints, and the split-DNS mapping already configured or authorized.|
 |Networks|Exact allocated CIDRs and reserved DNS/router/ingress IPs, with enough existing route information to check overlaps.|
 |Access|Assigned tag/auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat.|
@@ -71,8 +71,8 @@ and [Docker network allocation](https://docs.docker.com/engine/network/).
 Ask the developer:
 
 - Which machine, OS, Docker runtime, and checkout will run the services?
-- Are you accessing existing services, adding a worker to an existing SCION
-  Hub, or operating an independent application/ingress installation?
+- Are you accessing existing services, setting up personal Scion, adding a
+  worker to an existing Scion Hub, or operating independent ingress?
 - Will this machine join the existing Tailnet or a separate Tailnet?
 - Which suffix do you want, which service names should use it, and on which
   machine should those services run? Should other Tailnet devices reach them?
@@ -84,15 +84,72 @@ For access-only onboarding, preserve the shared endpoints and skip new-router
 configuration. Collect the DNS/route/access evidence needed to prove client
 connectivity; do not request unrelated administrator changes.
 
-## Application contributor path
+## Contributor roles
 
-A developer cloning the application to build a landing page or another
-feature needs a separate checkout and the task's application tooling. That
-does not make their machine another SCION controller or infrastructure owner.
-Keep the established Hub, ingress, DNS, Dozzle, and other server endpoints
-under their existing owners. Access those services through the existing
-Tailnet. Ask about worker registration only when contributing execution
-capacity is part of the requested work.
+Choose the execution role separately from the ingress role. For Animatrix,
+personal Scion with the developer's own AGY credentials is the preferred
+workflow; it does not itself require another DNS server, CA or subnet router.
+
+|Role|Setup and ownership|
+|-|-|
+|Access-only contributor|Own checkout and local tooling; use authorized existing services. No controller or ingress setup is required.|
+|Personal Scion|Own controller, state, credentials and runner identity. New task agents get their own Docker daemon. Use the Animatrix guide for application and harness setup.|
+|Additional shared-Hub worker|Explicitly register execution capacity with the existing Hub owner; this is a different role from personal Scion.|
+|Independent ingress operator|Configure a separate ingress/DNS/CA installation only with an allocated network and authorized scope from this questionnaire.|
+
+Keep shared ingress, DNS, Dozzle and knowledge/MCP endpoints under their
+existing owners and at their actual names. A personal application suffix
+does not rename those services. A personal controller's URL belongs in the
+selected developer's configuration, not as a replacement for shared endpoints.
+
+Use personal AGY and GitHub authorization. IDE login, command-line harness
+login, GitHub MCP auth and credentials projected into Scion agents each need
+their own check. Keep personal provider `.local` files outside version control;
+use tracked placeholder examples, including Animatrix's
+`env/.env.browserless`. The provider env directory is mounted read-only into
+the appropriate agent/dispatcher. Do not copy another controller's secret
+files, tokens or session state, or create dummy credentials to pass setup.
+
+Automatic issue-assignee routing is tracked in
+[Animatrix #191](https://github.com/teyfix/animatrix/issues/191). Treat it as
+pending until its two-controller acceptance is recorded. **Do not register a
+second runner using the current shared runner name/labels and `--replace`
+defaults.** Personal controller setup and a deliberate dashboard task launch
+can be verified separately; automated dispatch needs distinct registered
+controller/runner identities and demonstrated routing first.
+
+For AGY-only setup, select `SCION_ENABLED_PROVIDERS=antigravity` and follow
+the [personal-auth setup in Animatrix](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md).
+Its `controller:prepare` task starts the selected harness without importing
+host auth or starting an Actions runner. No Codex file or account is required.
+Check that the target checkout and image implement these tasks before using
+them; source validation does not establish what an existing controller runs.
+
+The `auth:antigravity` task imports an **existing** personal auth export. IDE
+login may use a keyring without creating that export. If no export exists,
+use the guide's native Scion login flow: an AGY authentication agent, interactive
+AGY login, project-scoped auth capture, then verification in a fresh AGY agent.
+Do not create dummy files or borrow another developer's login. Controller
+health with no host auth files verifies startup only; the peer's own login and
+fresh-agent authorization still need verification on their machine.
+
+The intended dispatch contract uses one registered assignee as initial
+execution owner. An unassigned issue stays in triage; multiple assignees need
+one explicit execution owner. The issue creator or commenter does not select
+the credential account. Running work keeps its recorded controller until an
+explicit handoff. Preserve old sessions/checkpoints when moving a task to a
+fresh DinD agent.
+
+For the first assigned task: assign the issue, deliberately launch on the
+intended controller, check its acknowledgement, inspect the preview, then
+review its PR. A GitHub issue/form or lifecycle comment can trigger work;
+configuration checks must not silently launch an agent. Use an agreed,
+non-dispatched item for write probes and leave `agent:ready` off it. Consult
+the [Animatrix onboarding guide](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md)
+for the exact launch and provider-env checks. Full Studio WebSocket and
+browser-S3 preview acceptance remains a separate product check.
+
+## Application contributor path
 
 Start only the application and dependencies required by the assigned issue.
 Do not prescribe a full application stack, GPU services, another CA, or a
@@ -177,6 +234,26 @@ After the authorized setup, verify each affected boundary:
 4. Required MCP calls and the selected application/SCION workflow work from
    that environment. Configuration parsing or a DNS answer alone is not proof.
 
+Use the shared
+[MCP connections and evidence matrix](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md#3-mcp-connections-and-evidence)
+for GitHub identity, Project permissions/relationships, knowledge access and
+optional diagnostics. Traefik has no checked-in workspace MCP config:
+inspect the installed client's MCP manager and version to find its effective
+personal/global configuration. Opening this checkout does not inherit
+Animatrix's workspace configuration. Check workspace/global precedence,
+duplicate server names, transport fields, commands/working directories,
+env/header availability, tool allowlists and timeouts without printing secrets.
+
+Use your own GitHub authorization and verify both repository and Project
+access; available MCP tools may not include Project or dependency writes.
+Use the documented personal GraphQL/`gh` fallback when needed. Test DNS and
+CA trust only for the endpoints this role actually uses. Keep optional database
+and Grafana targets tied to the intended repository and Docker daemon;
+do not start them as a baseline UI requirement. Verify real calls from the
+developer's WSL/IDE and, where applicable, a fresh agent separately. Scion's
+dashboard/API/Task lifecycle is separate from MCP unless a Scion MCP has
+actually been configured and verified.
+
 Report each check as observed, failed, or unverified. A missing configuration
 answer or unavailable client remains a stated next action, not a successful
 setup.
@@ -185,8 +262,13 @@ setup.
 
 ```text
 I want to start onboarding. Read AGENTS.md, .agents/rules/onboarding.md,
-and compose/tailscale/ONBOARDING.md. Start with the administrator's allocation,
-existing Tailnet DNS/routes, and this machine's networks. Reuse answers I
+and compose/tailscale/ONBOARDING.md. For application work I prefer personal
+Scion with my own AGY/GitHub credentials; select the execution role separately
+from whether I need ingress. Check the linked MCP matrix from my actual
+client and later a fresh agent. Do not register a second dispatcher with the
+shared defaults while assignee-to-controller routing is pending.
+For network setup, start with the administrator's allocation, existing
+Tailnet DNS/routes, and this machine's networks. Reuse answers I
 already supplied; treat missing route masks/owners and truncated DNS lists as
 unknown. My desired suffix is an input, not permission to rewrite CoreDNS.
 

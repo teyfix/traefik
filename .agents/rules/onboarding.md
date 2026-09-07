@@ -23,7 +23,10 @@ when that authority already exists.
 1. Read this repository's README and Tailscale guide. Inspect the current diff
    without reverting existing work.
 2. Establish the target machine, OS/Docker runtime, and whether this is an
-   existing shared installation or a new independent installation. Identify
+   access-only contributor, personal Scion installation, additional shared-Hub
+   worker, or independent ingress installation. Personal Scion with the
+   developer's own AGY/GitHub credentials is the preferred Animatrix execution
+   role; it does not require independent ingress. Identify
    the owner of the Tailnet DNS, routes, ingress, and CA. Resolve missing
    choices before dependent mutations; continue read-only inspection meanwhile.
    Complete `compose/tailscale/ONBOARDING.md`: start with the administrator's
@@ -45,6 +48,53 @@ when that authority already exists.
 5. Validate the selected Compose model without printing credentials. Start
    only the authorized installation/services, then verify DNS, HTTPS with
    certificate validation, and the intended application from the client.
+
+## Personal Scion and MCP
+
+Use the developer's own controller/state and AGY/GitHub authorization.
+Validate IDE login, command-line harness auth, GitHub MCP auth and Scion's
+projected credentials separately. Use fresh DinD agents for new tasks and
+read-only personal provider env mounts; tracked examples contain placeholders
+and real `.local` files remain ignored. Preserve old sessions/checkpoints
+during explicit handoffs. Do not require another developer's credentials.
+
+Automatic assignee-to-controller routing is owned by
+[Animatrix #191](https://github.com/teyfix/animatrix/issues/191) and remains
+pending until its two-controller acceptance passes. Do not register a second
+runner using the shared name/labels and `--replace` defaults. Initial
+execution belongs to one registered assignee; unassigned issues stay in
+triage and multiple assignees require an explicit execution owner. Issue
+creators/commenters must not choose credential accounts. Running work keeps
+its recorded controller until explicit handoff. Configuration verification
+does not authorize a task launch.
+
+For AGY-only setup use `SCION_ENABLED_PROVIDERS=antigravity` and the
+[Animatrix personal-auth guide](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md).
+`controller:prepare` starts the selected harness without auth imports or an
+Actions runner; no Codex account/file is required. Check that the target
+checkout/image implements this contract. `auth:antigravity` imports an existing
+personal export; IDE auth may instead live in a keyring. Without an export,
+follow the guide's native Scion interactive login, project-scoped capture and
+fresh-agent verification. Do not invent dummy files or borrow credentials.
+Distinguish controller startup evidence from the peer's unverified login.
+
+Read the canonical
+[MCP matrix](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md#3-mcp-connections-and-evidence)
+for selected connections. This repository has no workspace MCP config.
+Discover the actual installed client's config and version through its MCP
+manager; inspect inherited personal/global settings and effective tool access.
+Use personal auth and real calls to verify GitHub repositories and Project
+permissions independently. Verify endpoint DNS/CA only when that endpoint
+is used. Shared knowledge/diagnostic names keep their actual suffixes.
+Optional Postgres/Grafana tools must target the intended daemon and service
+with their read-only restrictions. Scion lifecycle is dashboard/API/Task,
+not an assumed MCP connection.
+
+Report checks from the developer's WSL/IDE separately from fresh-agent
+checks, and label unavailable-machine evidence unverified. For write probes
+use an agreed non-dispatched item; do not add `agent:ready` or issue a lifecycle
+command as a connectivity test. Follow the linked guide for assign, deliberate
+launch, acknowledgement, preview and PR review.
 
 ## Suffix configuration
 

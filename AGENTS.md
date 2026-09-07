@@ -16,3 +16,10 @@ inputs never block unrelated work.
 
 For assigned infrastructure work, read [README.md](README.md) and the
 [Tailscale operator guide](compose/tailscale/README.md) for the current design.
+
+Keep `AGENTS.md` and every Markdown file under `.agents/rules/` at most 12,000
+Unicode code points, including frontmatter. Move procedural detail to linked
+docs and route any new rule shards here. After editing rules or their checker,
+run `task check:agent-rules` (install check dependencies with
+`bun install --frozen-lockfile` first). This validates repository changes;
+it is not an onboarding prerequisite for ordinary sessions.

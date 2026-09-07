@@ -50,6 +50,16 @@ ordinary work. Application contributors should also use the
 [Animatrix onboarding guide](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md).
 Access to an existing installation does not require starting this stack locally.
 
+For Animatrix work, the preferred execution setup is a personal Scion
+installation with your own AGY and GitHub credentials. This is separate from
+operating ingress: keep shared DNS, CA and MCP endpoints under their existing
+owners. The [onboarding roles](compose/tailscale/ONBOARDING.md#contributor-roles)
+explain the choices and current dispatcher registration boundary. Check
+[MCP connections and evidence](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md#3-mcp-connections-and-evidence)
+from your actual client; this repository does not supply workspace MCP settings.
+The stack setup below applies when you are operating an authorized ingress
+installation.
+
 ### 1. Clone the Repository
 
 First, clone this repository to a local directory where you'll be running your
@@ -249,6 +259,16 @@ services:
 |`task certs`|Export certificates from Step CA|
 |`task certs:install`|Install the root CA into your Linux trust store|
 |`task purge`|Stop all services and remove CA, ACME, and Tailscale state|
+|`task check:agent-rules`|Typecheck and test the agent-rule character-limit check, then validate this checkout|
+
+Repository rule checks need Bun 1.4.0 and `bun install --frozen-lockfile` once
+per checkout. `task check:agent-rules` runs the same checks as pull-request CI;
+without Task, run `bun run typecheck`, `bun test`, and
+`bun run check:agent-rules`. Each `AGENTS.md` and Markdown rule under
+`.agents/rules/` is limited to 12,000 Unicode code points, including
+frontmatter; nested rule directories are included. Procedural documentation
+can live in linked guides. These checks do not start services or require an
+Animatrix sibling checkout.
 
 ---
 

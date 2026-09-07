@@ -1,0 +1,15 @@
+{
+  "name": "traefik-repository-checks",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "check:agent-rules": "bun scripts/check-agent-rules.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test scripts/check-agent-rules.test.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3"
+  }
+}

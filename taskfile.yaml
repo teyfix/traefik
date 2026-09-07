@@ -1,5 +1,11 @@
 version: 3
 tasks:
+  check:agent-rules:
+    desc: Typecheck, test, and enforce the 12,000-character agent rule limit
+    cmds:
+      - bun run typecheck
+      - bun test
+      - bun run check:agent-rules
   up:
     desc: Starts or recreates all services
     cmds:
