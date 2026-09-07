@@ -1,5 +1,9 @@
 # Shared Tailscale ingress and DNS
 
+Before onboarding a machine or choosing a suffix, complete the
+[dynamic setup questionnaire](ONBOARDING.md). The addresses and suffixes below
+describe this installation; they are not an allocation for a new router.
+
 This Compose component makes development services reachable from authorized
 tailnet devices under the private `tail.gg` DNS suffix. It owns the persistent
 Tailscale subnet-router identity, CoreDNS, and the shared
@@ -177,15 +181,8 @@ connector if `autogroup:admin` is too broad.
 
 ```json
 {
-  "tagOwners": {
-    "tag:docker": ["autogroup:admin"]
-  },
-  "autoApprovers": {
-    "routes": {
-      "10.10.10.0/24": ["tag:docker"],
-      "172.16.0.0/12": ["tag:docker"]
-    }
-  }
+  "autoApprovers": { "routes": { "10.10.10.0/24": ["tag:docker"], "172.16.0.0/12": ["tag:docker"] } },
+  "tagOwners": { "tag:docker": ["autogroup:admin"] }
 }
 ```
 
@@ -196,15 +193,7 @@ For example, this broad development grant permits members to reach both routed
 ranges on any IP protocol:
 
 ```json
-{
-  "grants": [
-    {
-      "src": ["autogroup:member"],
-      "dst": ["10.10.10.0/24", "172.16.0.0/12"],
-      "ip": ["*"]
-    }
-  ]
-}
+{ "grants": [{ "dst": ["10.10.10.0/24", "172.16.0.0/12"], "ip": ["*"], "src": ["autogroup:member"] }] }
 ```
 
 Prefer narrower groups and ports where practical. A narrowed policy must still

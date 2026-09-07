@@ -36,6 +36,20 @@ Tailscale connector.
 
 ## 🚀 Quick Start
 
+New contributor? Explicitly ask your agent:
+
+```text
+I want to start onboarding. Read AGENTS.md, .agents/rules/onboarding.md,
+and compose/tailscale/ONBOARDING.md. Start with my administrator-issued
+network allocation and existing configuration; preserve shared services.
+```
+
+The [questionnaire and shareable prompt](compose/tailscale/ONBOARDING.md)
+load only when onboarding is requested. No readiness file is required for
+ordinary work. Application contributors should also use the
+[Animatrix onboarding guide](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md).
+Access to an existing installation does not require starting this stack locally.
+
 ### 1. Clone the Repository
 
 First, clone this repository to a local directory where you'll be running your
@@ -50,7 +64,13 @@ Make sure you're inside the cloned folder before running any of the next steps.
 
 ### 2. Configure Tailscale
 
-Set the non-secret shared network values in `.env`. The intended defaults are:
+First complete the [onboarding questionnaire](compose/tailscale/ONBOARDING.md)
+with the current Tailnet administrator. Existing DNS zones, route owners, and
+the target machine's subnets determine the setup. Do not copy these values to
+another host until that conflict check is complete.
+
+Set the approved non-secret network values through the selected installation's
+environment configuration. This installation's checked-in defaults are:
 
 ```env
 TAIL_DOMAIN=tail.gg
@@ -67,7 +87,7 @@ only in the documented gitignored local environment file; never commit it.
 ### 3. Render and start the environment
 
 ```bash
-docker compose config
+docker compose config --quiet
 docker compose up -d
 ```
 
@@ -220,15 +240,15 @@ services:
 
 ## 🛠 Available Tasks
 
-| Task                 | Description                                                 |
-| -------------------- | ----------------------------------------------------------- |
-| `task up`            | Start or recreate all services                              |
-| `task down`          | Stop all services while preserving persistent state         |
-| `task recreate`      | Recreate all services                                        |
-| `task logs`          | Follow logs of all containers                               |
-| `task certs`         | Export certificates from Step CA                            |
-| `task certs:install` | Install the root CA into your Linux trust store             |
-| `task purge`         | Stop all services and remove CA, ACME, and Tailscale state  |
+|Task|Description|
+|-|-|
+|`task up`|Start or recreate all services|
+|`task down`|Stop all services while preserving persistent state|
+|`task recreate`|Recreate all services|
+|`task logs`|Follow logs of all containers|
+|`task certs`|Export certificates from Step CA|
+|`task certs:install`|Install the root CA into your Linux trust store|
+|`task purge`|Stop all services and remove CA, ACME, and Tailscale state|
 
 ---
 
