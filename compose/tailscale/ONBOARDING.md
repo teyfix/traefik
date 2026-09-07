@@ -27,7 +27,7 @@ existing Tailnet for every contributor.
 
 |Input|Administrator supplies|
 |-|-|
-|Target|Machine/router identity and whether this is application contribution, worker registration, or new ingress.|
+|Target|Machine identity and whether this is access to existing services or operation of independent ingress.|
 |Names|Requested suffix, existing shared endpoints, and the split-DNS mapping already configured or authorized.|
 |Networks|Exact allocated CIDRs and reserved DNS/router/ingress IPs, with enough existing route information to check overlaps.|
 |Access|Assigned tag/auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat.|
@@ -71,8 +71,7 @@ and [Docker network allocation](https://docs.docker.com/engine/network/).
 Ask the developer:
 
 - Which machine, OS, Docker runtime, and checkout will run the services?
-- Are you accessing existing services, adding a worker to an existing SCION
-  Hub, or operating an independent application/ingress installation?
+- Are you accessing existing services or operating independent ingress?
 - Will this machine join the existing Tailnet or a separate Tailnet?
 - Which suffix do you want, which service names should use it, and on which
   machine should those services run? Should other Tailnet devices reach them?
@@ -84,15 +83,25 @@ For access-only onboarding, preserve the shared endpoints and skip new-router
 configuration. Collect the DNS/route/access evidence needed to prove client
 connectivity; do not request unrelated administrator changes.
 
-## Application contributor path
+## Contributor roles
 
-A developer cloning the application to build a landing page or another
-feature needs a separate checkout and the task's application tooling. That
-does not make their machine another SCION controller or infrastructure owner.
-Keep the established Hub, ingress, DNS, Dozzle, and other server endpoints
-under their existing owners. Access those services through the existing
-Tailnet. Ask about worker registration only when contributing execution
-capacity is part of the requested work.
+Choose the ingress role from the actual service-access needs. Cloning an
+application repository does not itself require another DNS server, CA or
+subnet router. Follow that application's own guide for development tooling.
+
+|Role|Setup and ownership|
+|-|-|
+|Access-only contributor|Own checkout and local tooling; use authorized existing services. No controller or ingress setup is required.|
+|Independent ingress operator|Configure a separate ingress/DNS/CA installation only with an allocated network and authorized scope from this questionnaire.|
+
+Keep shared ingress, DNS and any other existing service endpoints under their
+existing owners and at their actual names. A personal application suffix
+does not rename those services. Use the developer's own credentials and
+authorized access. Keep real secrets in the documented ignored files; share
+placeholder examples and public CA certificates only. Do not copy another
+person's login files or create dummy credentials to pass setup.
+
+## Application contributor path
 
 Start only the application and dependencies required by the assigned issue.
 Do not prescribe a full application stack, GPU services, another CA, or a
@@ -122,7 +131,7 @@ facts `unknown`; do not replace them with repository defaults.
 |Subnet routes|Exact CIDRs advertised by each router, which are approved, router identity/location, and whether duplicate advertisements intentionally reach the same network.|
 |Access policy|Relevant grants/ACLs, tag ownership, route auto-approval, and allowed client-to-DNS/ingress traffic. Approval of a route does not grant access to it.|
 |Target machine networks|LAN, WSL/VM, other VPN, Docker network CIDRs/default address pools, and effective routes. Include existing Traefik network addresses and owners.|
-|Existing services|Actual ingress, SCION Hub, knowledge/MCP endpoints, and representative names that must keep working.|
+|Existing services|Actual ingress and any other shared endpoints, plus representative names that must keep working.|
 
 The DNS page supplies suffix mappings, not route masks, approved routes, router
 ownership, or access grants. Never infer a `/24` from a nameserver IP.
@@ -161,7 +170,7 @@ scope. Continue independent read-only work while blocked.
 Use `TAIL_DOMAIN` and `DIRECT_DOMAIN` for an authorized independent
 installation's zones. A personal suffix does not require changing
 `Corefile.gotpl`. Adding another zone to the shared resolver is a separately
-scoped implementation change. Preserve shared SCION and MCP endpoint names.
+scoped implementation change. Preserve existing shared service endpoint names.
 
 ## Verification from the actual client
 
@@ -174,27 +183,53 @@ After the authorized setup, verify each affected boundary:
    Docker, VPN, or existing Tailnet service was redirected.
 3. HTTPS validates the expected hostname and CA in the developer's browser
    and IDE environment. Never use disabled TLS validation as acceptance.
-4. Required MCP calls and the selected application/SCION workflow work from
+4. The selected application and any required client tools work from
    that environment. Configuration parsing or a DNS answer alone is not proof.
 
 Report each check as observed, failed, or unverified. A missing configuration
 answer or unavailable client remains a stated next action, not a successful
 setup.
 
-## Starter prompt for Antigravity
+## Optional client tools and MCP
+
+This repository does not provide workspace MCP settings or require an MCP
+server for ingress operation. If the developer uses MCP or another client
+integration to access services, verify only the selected connections:
+
+|Boundary|Evidence to collect from the actual client|
+|-|-|
+|Effective configuration|Installed client version and configuration location from its settings/tool manager; workspace/global precedence, duplicate server names and selected transport. Do not assume another checkout's settings apply.|
+|Local command|Executable and working directory exist in that runtime; arguments and environment variable names select the intended checkout, Docker daemon and service.|
+|Remote endpoint|Actual hostname resolves to the intended destination and HTTPS validates the hostname and CA in the browser, terminal, IDE or isolated runtime that will connect. A personal suffix does not rename a shared service.|
+|Personal authorization|Use the developer's own credentials, inspect tool availability and effective permissions, and perform one bounded read-only call against an authorized resource. Successful connection alone does not establish resource access.|
+|Client options|Check transport-specific fields, required environment/header availability, tool allowlists and timeouts without printing secrets. Client-side tool filtering does not replace server-side authorization.|
+
+Record each selected connection's result and the environment where it was
+observed. A host-terminal success does not prove IDE or container access.
+Report unavailable environments as unverified. Do not disable TLS checks,
+borrow another person's credentials, issue a write operation as a connectivity
+probe, or start unrelated services to make a configuration indicator green.
+Application-specific tooling and orchestration remain in that application's
+own documentation.
+
+## Starter prompt for an onboarding agent
 
 ```text
 I want to start onboarding. Read AGENTS.md, .agents/rules/onboarding.md,
-and compose/tailscale/ONBOARDING.md. Start with the administrator's allocation,
-existing Tailnet DNS/routes, and this machine's networks. Reuse answers I
+and compose/tailscale/ONBOARDING.md. Determine whether I need access to
+existing services or an independent ingress installation. Use my own
+credentials and check any selected client tools from the actual environment
+that will use them. Application setup belongs to its own repository.
+For network setup, start with the administrator's allocation, existing
+Tailnet DNS/routes, and this machine's networks. Reuse answers I
 already supplied; treat missing route masks/owners and truncated DNS lists as
 unknown. My desired suffix is an input, not permission to rewrite CoreDNS.
 
 Present the existing/proposed DNS and routing tables, conflict findings, and
 the exact configuration changes for the selected installation. Do not edit
-network configuration, start another router/controller, or change Tailnet
+network configuration, start another router/ingress stack, or change Tailnet
 settings until the required inputs and authorization for those changes exist.
-Preserve existing zones, routes, CA state, and shared SCION/MCP endpoints.
+Preserve existing zones, routes, CA state, and shared service endpoints.
 Use the existing environment inputs; do not hardcode my suffix into templates.
 After authorized setup, verify both new access and existing service behavior
 from my actual client, and report anything that remains unverified.

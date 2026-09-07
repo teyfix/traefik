@@ -23,7 +23,8 @@ when that authority already exists.
 1. Read this repository's README and Tailscale guide. Inspect the current diff
    without reverting existing work.
 2. Establish the target machine, OS/Docker runtime, and whether this is an
-   existing shared installation or a new independent installation. Identify
+   access-only contributor or an operator of an independent ingress installation.
+   Application development does not itself require independent ingress. Identify
    the owner of the Tailnet DNS, routes, ingress, and CA. Resolve missing
    choices before dependent mutations; continue read-only inspection meanwhile.
    Complete `compose/tailscale/ONBOARDING.md`: start with the administrator's
@@ -45,6 +46,27 @@ when that authority already exists.
 5. Validate the selected Compose model without printing credentials. Start
    only the authorized installation/services, then verify DNS, HTTPS with
    certificate validation, and the intended application from the client.
+
+## Personal access and optional client tools
+
+Use the developer's own credentials and authorized service access. Keep
+secrets in the documented ignored configuration and use placeholder examples;
+do not copy another person's login or invent dummy credentials. Application
+tooling and agent orchestration belong to the application repository's setup.
+
+This repository supplies no workspace MCP configuration. When client tools
+are part of the selected setup, follow the local guide's
+[connection checks](../../compose/tailscale/ONBOARDING.md#optional-client-tools-and-mcp).
+Discover the installed client's effective configuration and version, preserve
+the actual shared endpoint names, and verify personal permissions and real
+read-only calls. Check DNS and CA trust only for endpoints the role uses.
+Commands must target the intended checkout, runtime and service; configuration
+presence alone is not runtime evidence. Do not start optional services merely
+to complete onboarding or use a write operation as a connectivity test.
+
+Report browser, terminal, IDE and isolated runtime checks separately when
+applicable. Label unavailable-client evidence unverified and identify the next
+required check without blocking unrelated work.
 
 ## Suffix configuration
 

@@ -1,0 +1,26 @@
+name: Repository checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  agent-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Install check dependencies
+        run: bun install --frozen-lockfile
+      - name: Typecheck repository scripts
+        run: bun run typecheck
+      - name: Test rule limits and discovery
+        run: bun test
+      - name: Check current agent rules
+        run: bun run check:agent-rules
