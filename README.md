@@ -47,16 +47,16 @@ network allocation and existing configuration; preserve shared services.
 The [questionnaire and shareable prompt](compose/tailscale/ONBOARDING.md)
 load only when onboarding is requested. No readiness file is required for
 ordinary work. Application contributors should also use the
-[Animatrix onboarding guide](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md).
+setup instructions in their own application repository.
 Access to an existing installation does not require starting this stack locally.
 
-For Animatrix work, the preferred execution setup is a personal Scion
-installation with your own AGY and GitHub credentials. This is separate from
-operating ingress: keep shared DNS, CA and MCP endpoints under their existing
-owners. The [onboarding roles](compose/tailscale/ONBOARDING.md#contributor-roles)
-explain the choices and current dispatcher registration boundary. Check
-[MCP connections and evidence](https://github.com/teyfix/animatrix/blob/main/docs/ONBOARDING.md#3-mcp-connections-and-evidence)
-from your actual client; this repository does not supply workspace MCP settings.
+The [onboarding roles](compose/tailscale/ONBOARDING.md#contributor-roles)
+distinguish access to existing services from operating independent ingress.
+Keep shared DNS, CA and service endpoints under their existing owners. Use
+your own credentials and verify
+[optional client tool connections](compose/tailscale/ONBOARDING.md#optional-client-tools-and-mcp)
+from the environment that will use them; this repository does not supply
+workspace MCP settings.
 The stack setup below applies when you are operating an authorized ingress
 installation.
 
@@ -268,7 +268,7 @@ without Task, run `bun run typecheck`, `bun test`, and
 `.agents/rules/` is limited to 12,000 Unicode code points, including
 frontmatter; nested rule directories are included. Procedural documentation
 can live in linked guides. These checks do not start services or require an
-Animatrix sibling checkout.
+another project checkout.
 
 ---
 
