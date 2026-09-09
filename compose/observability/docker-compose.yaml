@@ -11,6 +11,8 @@ services:
     image: amir20/dozzle:${DOZZLE_VER?:}
     command: --enable-shell
     restart: unless-stopped
+    environment:
+      DOZZLE_ENABLE_MCP: true
     deploy:
       resources:
         limits:
