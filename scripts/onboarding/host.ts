@@ -58,7 +58,7 @@ export async function ensureIpForwarding(dryRun = false): Promise<void> {
       existing = await readFile(confPath, "utf-8");
     } catch {}
   }
-  if (!existing.includes("net.ipv4.ip_forward")) {
+  if (!/^\s*net\.ipv4\.ip_forward\s*=\s*1\s*$/m.test(existing)) {
     const procAppend = Bun.spawn(
       [
         "sudo",
@@ -68,7 +68,10 @@ export async function ensureIpForwarding(dryRun = false): Promise<void> {
       ],
       { stdout: "pipe", stderr: "pipe" },
     );
-    await procAppend.exited;
+    const code = await procAppend.exited;
+    if (code !== 0) {
+      throw new Error(`Failed to persist net.ipv4.ip_forward=1 to /etc/sysctl.d/99-tailscale.conf (exit code: ${code})`);
+    }
   }
 }
 

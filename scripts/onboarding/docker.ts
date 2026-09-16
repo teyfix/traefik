@@ -271,7 +271,7 @@ export async function hasLocalTailscaleState(
 
     // In dry-run mode, skip container execution and image pulling to guarantee zero mutations
     if (dryRun) {
-      return true;
+      return false;
     }
 
     // Inspect the actual state file inside the volume via a lightweight container execution

@@ -648,7 +648,7 @@ describe("Docker & state discovery semantics", () => {
         }
         return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
       }) as any;
-      expect(await hasLocalTailscaleState("tailscale:image", true)).toBe(true);
+      expect(await hasLocalTailscaleState("tailscale:image", true)).toBe(false);
       expect(dockerRunCalled).toBe(false);
     } finally {
       Bun.spawn = originalSpawn;
