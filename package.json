@@ -6,10 +6,14 @@
   "scripts": {
     "check:agent-rules": "bun scripts/check-agent-rules.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test scripts/check-agent-rules.test.ts"
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1",
+    "zod": "^4.6.5"
   }
 }

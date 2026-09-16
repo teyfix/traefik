@@ -1,0 +1,348 @@
+import * as p from "@clack/prompts";
+import { resolve } from "node:path";
+import { parseCliArgs, getHelpText, type RawCliOptions, resolveOptionValue } from "./options";
+import { getHostShortName, deriveDnsZoneFromHost, getLocalRoutes, ensureIpForwarding } from "./host";
+import {
+  isDockerInstalled,
+  isDockerDaemonReachable,
+  installDockerIfMissing,
+  inspectDockerNetworks,
+  configureDaemonAddressPool,
+  ensureDockerNetwork,
+} from "./docker";
+import { allocateDockerPool, deriveDnsResolverIp } from "./network";
+import { TailscaleApiClient } from "./tailscale-api";
+import {
+  inspectTailnet,
+  reconcileTailscalePolicy,
+  ensureRouterAuthKey,
+  reconcileSplitDns,
+  type TailnetDiscovery,
+} from "./tailscale";
+import { parseEnv, mergeEnvFile, redactSecret } from "./env";
+import { installRootCa } from "./certificates";
+import { startTraefikStack, waitForTraefikHealthy } from "./traefik";
+import { runVerification } from "./verify";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+
+export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
+  let cliOptions: RawCliOptions;
+  try {
+    cliOptions = parseCliArgs(rawArgs);
+  } catch (err) {
+    console.error(`Invalid arguments: ${(err as Error).message}\n`);
+    console.error(getHelpText());
+    process.exit(1);
+  }
+
+  if (cliOptions.help) {
+    console.log(getHelpText());
+    return;
+  }
+
+  const repoRoot = resolve(import.meta.dir, "../..");
+  p.intro("Traefik & Tailscale Ingress Onboarding");
+
+  // Phase 1: Host discovery
+  const hostShort = await getHostShortName();
+  p.log.step(`Host: ${hostShort}`);
+
+  // Phase 2: Docker status
+  const s = p.spinner();
+  s.start("Checking Docker Engine status");
+  const dockerInstalled = await isDockerInstalled();
+  if (!dockerInstalled) {
+    s.stop("Docker Engine not found. Installing official Docker Engine...");
+    await installDockerIfMissing(cliOptions.dryRun);
+  } else {
+    const reachable = await isDockerDaemonReachable();
+    if (!reachable) {
+      s.stop("Docker daemon is unreachable. Please ensure Docker is running.");
+      process.exit(1);
+    }
+    s.stop("Docker Engine is ready");
+  }
+
+  // Phase 3: Tailscale API client and discovery
+  const apiToken = process.env.TS_API_TOKEN;
+  if (!apiToken) {
+    p.cancel(
+      "Tailscale API token missing.\n\n" +
+        "Please provide TS_API_TOKEN in your environment:\n" +
+        '  TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts [options]\n',
+    );
+    process.exit(1);
+  }
+
+  s.start("Inspecting Tailnet topology and routing");
+  let apiClient: TailscaleApiClient;
+  let tailnet: TailnetDiscovery;
+  try {
+    apiClient = new TailscaleApiClient(apiToken);
+    tailnet = await inspectTailnet(apiClient);
+    s.stop("Tailnet inspected: devices, routes, policy, and split-DNS discovered");
+  } catch (err) {
+    s.stop(`Failed to inspect Tailnet: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  // Phase 4: Route and CIDR conflict aggregation
+  const [localRoutes, dockerNetworks] = await Promise.all([
+    getLocalRoutes(),
+    inspectDockerNetworks(),
+  ]);
+
+  const existingSubnets = [
+    ...localRoutes,
+    ...dockerNetworks.flatMap((n) => n.subnets),
+    ...tailnet.routes,
+  ];
+
+  // Check existing .env in repo
+  const envPath = resolve(repoRoot, ".env");
+  let existingEnv: Record<string, string> = {};
+  if (existsSync(envPath)) {
+    try {
+      existingEnv = parseEnv(await readFile(envPath, "utf-8"));
+    } catch {}
+  }
+
+  // Phase 5: Option resolution
+  // 5.1 Docker pool
+  const recommendedPool = allocateDockerPool(existingSubnets, existingEnv.DOCKER_POOL);
+  const resolvedPoolInput = await resolveOptionValue({
+    cliValue: cliOptions.dockerPool,
+    defaultValue: recommendedPool.hostPool,
+    isYes: cliOptions.yes,
+    promptFn: async (rec) => {
+      const val = await p.text({
+        message: "Docker address pool (/18):",
+        initialValue: rec,
+        validate: (input) => {
+          if (!input || input === "auto") return;
+          if (!/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/18$/.test(input)) {
+            return "Please provide a valid /18 CIDR (e.g. 10.128.64.0/18) or 'auto'";
+          }
+        },
+      });
+      if (p.isCancel(val)) {
+        p.cancel("Onboarding cancelled.");
+        process.exit(0);
+      }
+      return val as string;
+    },
+  });
+
+  const finalPool =
+    resolvedPoolInput === "auto"
+      ? recommendedPool
+      : allocateDockerPool(existingSubnets, resolvedPoolInput);
+
+  // Compute final routed subnet & DNS resolver IP belonging to the routed subnet
+  const routedSubnet = finalPool.routedSubnet; // e.g. 10.128.64.0/24
+  const dnsResolverIp = deriveDnsResolverIp(
+    routedSubnet,
+    10,
+    existingEnv.TS_DNS_SERVER,
+  );
+
+  // 5.2 Private DNS Zone
+  const recommendedZone = deriveDnsZoneFromHost(hostShort, "gg");
+  const resolvedZone = await resolveOptionValue({
+    cliValue: cliOptions.tsDnsZone,
+    defaultValue: existingEnv.TAIL_DOMAIN || recommendedZone,
+    isYes: cliOptions.yes,
+    promptFn: async (rec) => {
+      const val = await p.text({
+        message: "Private split-DNS zone:",
+        initialValue: rec,
+        validate: (input) => {
+          if (!input || input === "auto") return;
+          if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(input)) {
+            return "Enter a valid domain suffix (e.g. dixie.gg) or 'auto'";
+          }
+        },
+      });
+      if (p.isCancel(val)) {
+        p.cancel("Onboarding cancelled.");
+        process.exit(0);
+      }
+      return val as string;
+    },
+  });
+
+  const finalZone = (resolvedZone === "auto" ? recommendedZone : resolvedZone).toLowerCase();
+
+  // 5.3 Router Tag
+  const resolvedTag = cliOptions.tsRouterTag.startsWith("tag:")
+    ? cliOptions.tsRouterTag
+    : `tag:${cliOptions.tsRouterTag}`;
+
+  // 5.4 Router Hostname
+  const defaultTsHostname = `${hostShort}-router`;
+  const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
+
+  // Display Configuration Summary
+  p.note(
+    [
+      `Host:             ${hostShort}`,
+      `Docker pool:       ${finalPool.hostPool}`,
+      `Routed subnet:     ${routedSubnet}`,
+      `DNS resolver IP:   ${dnsResolverIp}`,
+      `Private DNS zone:  ${finalZone}`,
+      `Router tag:        ${resolvedTag}`,
+      `Router hostname:   ${resolvedTsHostname}`,
+      cliOptions.dryRun ? "\nMode: DRY RUN (no mutations will be applied)" : "",
+    ].join("\n"),
+    "Proposed Configuration",
+  );
+
+  p.log.warn(
+    "Some OAuth providers may not accept private/split-DNS domains or may additionally " +
+      "require domain ownership, public DNS, HTTPS, or application/domain verification.",
+  );
+
+  // Confirmation if not --yes and not --dry-run
+  if (!cliOptions.yes && !cliOptions.dryRun) {
+    const confirmed = await p.confirm({
+      message: "Ready to apply infrastructure mutations and start Traefik?",
+      initialValue: true,
+    });
+    if (p.isCancel(confirmed) || !confirmed) {
+      p.cancel("Onboarding aborted. No changes applied.");
+      return;
+    }
+  }
+
+  // Phase 6: Apply Mutations
+  const actionSpinner = p.spinner();
+
+  // 6.1 Sysctl forwarding
+  actionSpinner.start("Configuring Linux IPv4 forwarding sysctls");
+  await ensureIpForwarding(cliOptions.dryRun);
+  actionSpinner.stop("IPv4 packet forwarding verified");
+
+  // 6.2 Docker daemon.json
+  actionSpinner.start(`Configuring Docker daemon address pool (${finalPool.hostPool})`);
+  const { changed: daemonChanged } = await configureDaemonAddressPool(
+    finalPool.hostPool,
+    cliOptions.dryRun,
+  );
+  actionSpinner.stop(
+    daemonChanged
+      ? `Updated /etc/docker/daemon.json with default address pool ${finalPool.hostPool}`
+      : "Docker daemon address pool already up-to-date",
+  );
+
+  // 6.3 Docker external proxy network
+  actionSpinner.start("Ensuring Docker 'traefik_proxy' network exists");
+  await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun);
+  actionSpinner.stop("Docker 'traefik_proxy' network verified");
+
+  // 6.4 Tailscale Policy Update
+  actionSpinner.start("Reconciling Tailscale ACL policy (tagOwners & autoApprovers.routes)");
+  const policyRes = await reconcileTailscalePolicy({
+    client: apiClient,
+    currentPolicy: tailnet.policy,
+    etag: tailnet.etag,
+    routerTag: resolvedTag,
+    routedSubnet,
+    dryRun: cliOptions.dryRun,
+  });
+  actionSpinner.stop(policyRes.reason);
+
+  // 6.5 Tailscale Split DNS
+  actionSpinner.start(`Configuring Tailscale split DNS (${finalZone} -> ${dnsResolverIp})`);
+  const splitRes = await reconcileSplitDns({
+    client: apiClient,
+    currentSplitDns: tailnet.splitDns,
+    dnsZone: finalZone,
+    dnsResolverIp,
+    dryRun: cliOptions.dryRun,
+  });
+  actionSpinner.stop(splitRes.reason);
+
+  // 6.6 Tailscale Router Reusable Auth Key
+  actionSpinner.start(`Ensuring reusable auth key for ${resolvedTag}`);
+  const authKeyRes = await ensureRouterAuthKey({
+    client: apiClient,
+    existingKey: existingEnv.TS_AUTHKEY,
+    routerTag: resolvedTag,
+    hostname: resolvedTsHostname,
+    dryRun: cliOptions.dryRun,
+  });
+  actionSpinner.stop(
+    authKeyRes.generated
+      ? `Generated reusable auth key (${redactSecret(authKeyRes.authKey)})`
+      : `Reusing existing auth key (${redactSecret(authKeyRes.authKey)})`,
+  );
+
+  // 6.7 Update Traefik .env
+  actionSpinner.start("Updating Traefik .env configuration");
+  const envUpdates: Record<string, string> = {
+    TS_HOSTNAME: resolvedTsHostname,
+    TS_ROUTES: routedSubnet,
+    TS_SERVICE_SUBNET: routedSubnet,
+    TS_DNS_SERVER: dnsResolverIp,
+    TAIL_DOMAIN: finalZone,
+    DIRECT_DOMAIN: `dkr.${finalZone}`,
+    TRAEFIK_DOMAIN: `traefik.${finalZone}`,
+    DOCKER_POOL: finalPool.hostPool,
+    TS_ROUTER_TAG: resolvedTag,
+    TS_AUTHKEY: authKeyRes.authKey,
+  };
+
+  if (!cliOptions.dryRun) {
+    await mergeEnvFile(envPath, envUpdates);
+    // Also update env/.env.tailscale.local if it exists
+    const tailscaleEnvPath = resolve(repoRoot, "env/.env.tailscale.local");
+    if (existsSync(tailscaleEnvPath)) {
+      await mergeEnvFile(tailscaleEnvPath, { TS_AUTHKEY: authKeyRes.authKey });
+    }
+  }
+  actionSpinner.stop("Traefik .env updated");
+
+  // 6.8 Start Traefik Stack
+  if (!cliOptions.dryRun) {
+    actionSpinner.start("Starting Traefik edge services (traefik, stepca, coredns, ts-router)");
+    await startTraefikStack(repoRoot, cliOptions.dryRun);
+    const health = await waitForTraefikHealthy(repoRoot);
+    actionSpinner.stop(
+      health.healthy
+        ? "Traefik stack is up and all services are healthy"
+        : "Traefik services started (some services may still be initializing)",
+    );
+
+    // 6.9 Install Step CA Root Certificate
+    actionSpinner.start("Checking & installing Step CA root certificate");
+    const caRes = await installRootCa(repoRoot, cliOptions.dryRun);
+    actionSpinner.stop(caRes.reason);
+  }
+
+  // Phase 7: Verification
+  if (!cliOptions.dryRun) {
+    p.log.step("Running end-to-end verification checks...");
+    const verifyResults = await runVerification({
+      repoRoot,
+      dnsZone: finalZone,
+      dnsResolverIp,
+      routedSubnet,
+      routerTag: resolvedTag,
+      tsHostname: resolvedTsHostname,
+      apiClient,
+    });
+
+    for (const r of verifyResults) {
+      if (r.passed) {
+        p.log.success(`✓ ${r.step}: ${r.message || "OK"}`);
+      } else {
+        p.log.error(`✗ ${r.step}: ${r.message || "Failed"}`);
+      }
+    }
+  } else {
+    p.log.info("Dry run complete. No mutations were applied to host or tailnet.");
+  }
+
+  p.outro("Onboarding complete!");
+}
