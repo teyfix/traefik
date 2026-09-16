@@ -28,6 +28,7 @@ export const CliOptionsSchema = z.object({
   tsDnsZone: DnsZoneSchema.optional(),
   tsRouterTag: z.string().default("tag:docker"),
   tsHostname: z.string().optional(),
+  replaceSplitDns: z.boolean().default(false),
   rotateAuthKey: z.boolean().default(false),
   yes: z.boolean().default(false),
   dryRun: z.boolean().default(false),
@@ -41,6 +42,7 @@ export interface ResolvedOptions {
   tsDnsZone: string; // domain or "auto"
   tsRouterTag: string;
   tsHostname: string;
+  replaceSplitDns: boolean;
   rotateAuthKey: boolean;
   yes: boolean;
   dryRun: boolean;
@@ -54,6 +56,7 @@ export function parseCliArgs(args: string[] = process.argv.slice(2)): RawCliOpti
       "ts-dns-zone": { type: "string" },
       "ts-router-tag": { type: "string" },
       "ts-hostname": { type: "string" },
+      "replace-split-dns": { type: "boolean" },
       "rotate-authkey": { type: "boolean" },
       yes: { type: "boolean", short: "y" },
       "dry-run": { type: "boolean" },
@@ -68,6 +71,7 @@ export function parseCliArgs(args: string[] = process.argv.slice(2)): RawCliOpti
     tsDnsZone: values["ts-dns-zone"],
     tsRouterTag: values["ts-router-tag"] ?? "tag:docker",
     tsHostname: values["ts-hostname"],
+    replaceSplitDns: values["replace-split-dns"] ?? false,
     rotateAuthKey: values["rotate-authkey"] ?? false,
     yes: values.yes ?? false,
     dryRun: values["dry-run"] ?? false,
@@ -86,6 +90,7 @@ Options:
   --ts-dns-zone <zone|auto>   Tailscale private split-DNS zone (e.g. dixie.gg or "auto")
   --ts-router-tag <tag>       Tailscale tag for router device (default: tag:docker)
   --ts-hostname <name>        Tailscale router hostname (default: $(hostname -s)-router)
+  --replace-split-dns         Overwrite existing Tailscale split-DNS resolver(s) for the zone if conflicting
   --rotate-authkey            Force generation of a new Tailscale auth key instead of reusing existing key
   -y, --yes                   Accept recommended/default values without confirmation
   --dry-run                   Plan mutations without applying any changes

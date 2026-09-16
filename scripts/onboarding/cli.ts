@@ -283,23 +283,29 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
 
   const finalZone = (resolvedZone === "auto" ? recommendedZone : resolvedZone).toLowerCase();
-  let forceReplaceDns = false;
+  let forceReplaceDns = cliOptions.replaceSplitDns;
   const existingZoneResolvers = tailnet.splitDns[finalZone] || [];
-  if (existingZoneResolvers.length > 0 && !existingZoneResolvers.includes(dnsResolverIp)) {
-    if (cliOptions.yes) {
+  const hasDnsConflict =
+    existingZoneResolvers.length > 0 && !existingZoneResolvers.includes(dnsResolverIp);
+
+  if (hasDnsConflict && !forceReplaceDns) {
+    if (cliOptions.dryRun) {
+      // In dry-run mode, do not prompt or throw; conflict and required flag are reported in the plan
+    } else if (cliOptions.yes) {
       throw new Error(
-        `Conflict: Split DNS zone '${finalZone}' already exists on tailnet pointing to [${existingZoneResolvers.join(", ")}]. Refusing to overwrite existing zone without explicit confirmation.`,
+        `Conflict: Split DNS zone '${finalZone}' already exists on tailnet pointing to [${existingZoneResolvers.join(", ")}]. Pass --replace-split-dns to overwrite existing resolvers.`,
       );
+    } else {
+      const confirmReplace = await p.confirm({
+        message: `Split DNS zone '${finalZone}' already points to [${existingZoneResolvers.join(", ")}]. Replace existing resolver with ${dnsResolverIp}?`,
+        initialValue: false,
+      });
+      if (p.isCancel(confirmReplace) || !confirmReplace) {
+        p.cancel("Onboarding cancelled due to DNS zone conflict.");
+        process.exit(0);
+      }
+      forceReplaceDns = true;
     }
-    const confirmReplace = await p.confirm({
-      message: `Split DNS zone '${finalZone}' already points to [${existingZoneResolvers.join(", ")}]. Replace existing resolver with ${dnsResolverIp}?`,
-      initialValue: false,
-    });
-    if (p.isCancel(confirmReplace) || !confirmReplace) {
-      p.cancel("Onboarding cancelled due to DNS zone conflict.");
-      process.exit(0);
-    }
-    forceReplaceDns = true;
   }
 
   // 5.3 Router Tag
@@ -317,6 +323,13 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     routesToAdvertise.push(proxySubnet);
   }
 
+  let dnsZonePlan = finalZone;
+  if (hasDnsConflict) {
+    dnsZonePlan = forceReplaceDns
+      ? `${finalZone} (overwriting existing resolvers: [${existingZoneResolvers.join(", ")}])`
+      : `${finalZone} (CONFLICT: currently points to [${existingZoneResolvers.join(", ")}]; pass --replace-split-dns to overwrite)`;
+  }
+
   // Display Configuration Summary
   p.note(
     [
@@ -326,7 +339,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       `Proxy subnet:      ${proxySubnet}`,
       `Advertised routes: ${routesToAdvertise.join(", ")}`,
       `DNS resolver IP:   ${dnsResolverIp}`,
-      `Private DNS zone:  ${finalZone}`,
+      `Private DNS zone:  ${dnsZonePlan}`,
       `Router tag:        ${resolvedTag}`,
       `Router hostname:   ${resolvedTsHostname}`,
       cliOptions.dryRun ? "\nMode: DRY RUN (no mutations will be applied)" : "",

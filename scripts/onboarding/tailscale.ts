@@ -126,16 +126,24 @@ export async function reconcileSplitDns(params: {
   }
 
   if (existingResolvers.length > 0 && !forceReplace) {
+    if (dryRun) {
+      return {
+        applied: false,
+        reason: `Dry run: Split DNS conflict for ${cleanZone} (existing: [${existingResolvers.join(", ")}], pass --replace-split-dns to overwrite).`,
+      };
+    }
     throw new Error(
-      `Conflict: Split DNS zone '${cleanZone}' already exists on tailnet pointing to [${existingResolvers.join(", ")}]. Refusing to overwrite existing zone without explicit confirmation.`,
+      `Conflict: Split DNS zone '${cleanZone}' already exists on tailnet pointing to [${existingResolvers.join(", ")}]. Pass --replace-split-dns to overwrite existing resolvers.`,
     );
   }
 
+  const replaceNote = existingResolvers.length > 0 ? ` (replacing [${existingResolvers.join(", ")}])` : "";
+
   if (dryRun) {
-    return { applied: true, reason: `Dry run: Would update split DNS ${cleanZone} -> [${dnsResolverIp}]` };
+    return { applied: true, reason: `Dry run: Would update split DNS ${cleanZone} -> [${dnsResolverIp}]${replaceNote}` };
   }
 
   await client.updateSplitDns(cleanZone, [dnsResolverIp]);
-  return { applied: true, reason: `Updated split DNS for ${cleanZone} -> [${dnsResolverIp}]` };
+  return { applied: true, reason: `Updated split DNS for ${cleanZone} -> [${dnsResolverIp}]${replaceNote}` };
 }
 

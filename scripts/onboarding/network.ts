@@ -190,15 +190,17 @@ export function allocateDockerPool(
     return { hostPool: range.cidr, routedSubnet, proxySubnet, dnsResolver };
   }
 
-  // Generate candidate /18 pools in 10.128.0.0/9 (each /18 has 16384 IPs = step of 64 in 3rd octet if 2nd octet fixed, or 256 /24s)
-  // 10.128.0.0, 10.128.64.0, 10.128.128.0, 10.128.192.0, 10.129.0.0, ...
+  // Generate candidate /18 pools in 10.128.0.0/9
+  // Managed space 10.128.0.0/9 contains 2^(18 - 9) = 512 candidate /18 host pools (each 16,384 IPs).
+  const managedPrefix = 9;
+  const targetPrefix = 18;
+  const candidateCount = 1 << (targetPrefix - managedPrefix); // 512
   const baseStart = ipToInt("10.128.0.0");
-  const step = 64 * 256; // 16384 IPs
-  const maxPools = 32;
+  const step = 1 << (32 - targetPrefix); // 16384 IPs
 
-  for (let i = 0; i < maxPools; i++) {
+  for (let i = 0; i < candidateCount; i++) {
     const candidateInt = (baseStart + i * step) >>> 0;
-    const candidateRange = parseCidr(`${intToIp(candidateInt)}/18`);
+    const candidateRange = parseCidr(`${intToIp(candidateInt)}/${targetPrefix}`);
 
     if (!hasPoolConflict(candidateRange)) {
       try {

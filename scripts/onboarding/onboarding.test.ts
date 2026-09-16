@@ -82,6 +82,24 @@ describe("Network & CIDR calculation", () => {
     expect(pool.proxySubnet).toBe("10.128.66.0/24");
     expect(pool.dnsResolver).toBe("10.128.65.10");
   });
+
+  test("scans full range of 512 candidate /18 pools beyond index 32", () => {
+    // Fill the first 40 /18 pools in 10.128.0.0/9
+    const baseStart = (10 << 24) | (128 << 16);
+    const step = 16384;
+    const occupiedRoutes: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const ip = (baseStart + i * step) >>> 0;
+      const ipStr = [(ip >>> 24) & 255, (ip >>> 16) & 255, (ip >>> 8) & 255, ip & 255].join(".");
+      occupiedRoutes.push(`${ipStr}/18`);
+    }
+
+    const pool = allocateDockerPool(occupiedRoutes);
+    // 40th pool index (candidate 40)
+    const expectedInt = (baseStart + 40 * step) >>> 0;
+    const expectedIp = [(expectedInt >>> 24) & 255, (expectedInt >>> 16) & 255, (expectedInt >>> 8) & 255, expectedInt & 255].join(".");
+    expect(pool.hostPool).toBe(`${expectedIp}/18`);
+  });
 });
 
 describe("Host & DNS Zone derivation", () => {
@@ -257,12 +275,14 @@ describe("CLI resolution contract", () => {
       "--ts-dns-zone",
       "dixie.gg",
       "--rotate-authkey",
+      "--replace-split-dns",
       "--yes",
       "--dry-run",
     ]);
     expect(options.dockerPool).toBe("10.128.64.0/18");
     expect(options.tsDnsZone).toBe("dixie.gg");
     expect(options.rotateAuthKey).toBe(true);
+    expect(options.replaceSplitDns).toBe(true);
     expect(options.yes).toBe(true);
     expect(options.dryRun).toBe(true);
   });
@@ -419,6 +439,29 @@ describe("Tailscale API Client semantics", () => {
     });
     expect(res.applied).toBe(true);
     expect(patchCalled).toBe(true);
+
+    // 3. Conflict in dryRun mode without forceReplace reports conflict safely without throwing
+    const dryRunConflict = await reconcileSplitDns({
+      client,
+      currentSplitDns: { "example.gg": ["1.2.3.4"] },
+      dnsZone: "example.gg",
+      dnsResolverIp: "10.128.64.10",
+      dryRun: true,
+    });
+    expect(dryRunConflict.applied).toBe(false);
+    expect(dryRunConflict.reason).toContain("pass --replace-split-dns to overwrite");
+
+    // 4. Conflict in dryRun mode with forceReplace indicates replacement
+    const dryRunForce = await reconcileSplitDns({
+      client,
+      currentSplitDns: { "example.gg": ["1.2.3.4"] },
+      dnsZone: "example.gg",
+      dnsResolverIp: "10.128.64.10",
+      forceReplace: true,
+      dryRun: true,
+    });
+    expect(dryRunForce.applied).toBe(true);
+    expect(dryRunForce.reason).toContain("replacing [1.2.3.4]");
   });
 
   test("ensureRouterAuthKey regenerates key when unregistered or forced", async () => {
