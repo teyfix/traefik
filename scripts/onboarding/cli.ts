@@ -1,6 +1,13 @@
 import * as p from "@clack/prompts";
 import { resolve } from "node:path";
-import { parseCliArgs, getHelpText, type RawCliOptions, resolveOptionValue } from "./options";
+import {
+  parseCliArgs,
+  getHelpText,
+  type RawCliOptions,
+  resolveOptionValue,
+  DockerPoolSchema,
+  DnsZoneSchema,
+} from "./options";
 import { getHostShortName, deriveDnsZoneFromHost, getLocalRoutes, ensureIpForwarding } from "./host";
 import {
   isDockerInstalled,
@@ -10,7 +17,7 @@ import {
   configureDaemonAddressPool,
   ensureDockerNetwork,
 } from "./docker";
-import { allocateDockerPool, deriveDnsResolverIp } from "./network";
+import { allocateDockerPool, deriveDnsResolverIp, cidrsOverlap } from "./network";
 import { TailscaleApiClient } from "./tailscale-api";
 import {
   inspectTailnet,
@@ -24,7 +31,7 @@ import { installRootCa } from "./certificates";
 import { startTraefikStack, waitForTraefikHealthy } from "./traefik";
 import { runVerification } from "./verify";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, copyFile } from "node:fs/promises";
 
 export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
   let cliOptions: RawCliOptions;
@@ -93,24 +100,61 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     inspectDockerNetworks(),
   ]);
 
+  // Check existing .env or .example.env in repo
+  const envPath = resolve(repoRoot, ".env");
+  const exampleEnvPath = resolve(repoRoot, ".example.env");
+  let existingEnv: Record<string, string> = {};
+  if (existsSync(envPath)) {
+    try {
+      existingEnv = parseEnv(await readFile(envPath, "utf-8"));
+    } catch {}
+  } else if (existsSync(exampleEnvPath)) {
+    try {
+      existingEnv = parseEnv(await readFile(exampleEnvPath, "utf-8"));
+    } catch {}
+  }
+
+  // Identify subnets owned by this installation so reruns do not treat them as external conflicts
+  const ownSubnets: string[] = [];
+  for (const net of dockerNetworks) {
+    if (net.name === "tailscale_services" || net.name === "traefik_proxy") {
+      ownSubnets.push(...net.subnets);
+    }
+  }
+  if (existingEnv.TS_SERVICE_SUBNET) {
+    ownSubnets.push(existingEnv.TS_SERVICE_SUBNET);
+  }
+  if (existingEnv.TS_ROUTES) {
+    for (const r of existingEnv.TS_ROUTES.split(",")) {
+      const trimmed = r.trim();
+      if (trimmed && !ownSubnets.includes(trimmed)) {
+        ownSubnets.push(trimmed);
+      }
+    }
+  }
+
+  // Also include advertised routes of any existing router device on tailnet
+  const existingRouterDevice = tailnet.devices.find(
+    (d) =>
+      d.name.includes(hostShort) ||
+      d.hostname.includes(hostShort) ||
+      (d.tags && d.tags.includes(cliOptions.tsRouterTag)),
+  );
+  if (existingRouterDevice?.advertisedRoutes) {
+    for (const r of existingRouterDevice.advertisedRoutes) {
+      if (!ownSubnets.includes(r)) ownSubnets.push(r);
+    }
+  }
+
   const existingSubnets = [
     ...localRoutes,
     ...dockerNetworks.flatMap((n) => n.subnets),
     ...tailnet.routes,
   ];
 
-  // Check existing .env in repo
-  const envPath = resolve(repoRoot, ".env");
-  let existingEnv: Record<string, string> = {};
-  if (existsSync(envPath)) {
-    try {
-      existingEnv = parseEnv(await readFile(envPath, "utf-8"));
-    } catch {}
-  }
-
   // Phase 5: Option resolution
   // 5.1 Docker pool
-  const recommendedPool = allocateDockerPool(existingSubnets, existingEnv.DOCKER_POOL);
+  const recommendedPool = allocateDockerPool(existingSubnets, existingEnv.DOCKER_POOL, ownSubnets);
   const resolvedPoolInput = await resolveOptionValue({
     cliValue: cliOptions.dockerPool,
     defaultValue: recommendedPool.hostPool,
@@ -120,9 +164,12 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
         message: "Docker address pool (/18):",
         initialValue: rec,
         validate: (input) => {
-          if (!input || input === "auto") return;
-          if (!/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/18$/.test(input)) {
-            return "Please provide a valid /18 CIDR (e.g. 10.128.64.0/18) or 'auto'";
+          const parsed = DockerPoolSchema.safeParse(input);
+          if (!parsed.success) {
+            return (
+              parsed.error.issues[0]?.message ||
+              "Please provide a valid /18 CIDR (e.g. 10.128.64.0/18) or 'auto'"
+            );
           }
         },
       });
@@ -137,7 +184,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const finalPool =
     resolvedPoolInput === "auto"
       ? recommendedPool
-      : allocateDockerPool(existingSubnets, resolvedPoolInput);
+      : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets);
 
   // Compute final routed subnet & DNS resolver IP belonging to the routed subnet
   const routedSubnet = finalPool.routedSubnet; // e.g. 10.128.64.0/24
@@ -158,9 +205,9 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
         message: "Private split-DNS zone:",
         initialValue: rec,
         validate: (input) => {
-          if (!input || input === "auto") return;
-          if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(input)) {
-            return "Enter a valid domain suffix (e.g. dixie.gg) or 'auto'";
+          const parsed = DnsZoneSchema.safeParse(input);
+          if (!parsed.success) {
+            return parsed.error.issues[0]?.message || "Enter a valid domain suffix (e.g. dixie.gg) or 'auto'";
           }
         },
       });
@@ -183,12 +230,25 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const defaultTsHostname = `${hostShort}-router`;
   const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
 
+  // Determine routes to advertise (both TS_SERVICE_SUBNET and traefik_proxy if separate)
+  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
+  const existingProxySubnet = proxyNet?.subnets[0];
+  const routesToAdvertise: string[] = [routedSubnet];
+  if (
+    existingProxySubnet &&
+    existingProxySubnet !== routedSubnet &&
+    !cidrsOverlap(routedSubnet, existingProxySubnet)
+  ) {
+    routesToAdvertise.push(existingProxySubnet);
+  }
+
   // Display Configuration Summary
   p.note(
     [
       `Host:             ${hostShort}`,
       `Docker pool:       ${finalPool.hostPool}`,
       `Routed subnet:     ${routedSubnet}`,
+      `Advertised routes: ${routesToAdvertise.join(", ")}`,
       `DNS resolver IP:   ${dnsResolverIp}`,
       `Private DNS zone:  ${finalZone}`,
       `Router tag:        ${resolvedTag}`,
@@ -240,6 +300,19 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun);
   actionSpinner.stop("Docker 'traefik_proxy' network verified");
 
+  if (!cliOptions.dryRun) {
+    const updatedNetworks = await inspectDockerNetworks();
+    const currentProxy = updatedNetworks.find((n) => n.name === "traefik_proxy");
+    const allocatedProxySubnet = currentProxy?.subnets[0];
+    if (
+      allocatedProxySubnet &&
+      !routesToAdvertise.includes(allocatedProxySubnet) &&
+      !cidrsOverlap(routedSubnet, allocatedProxySubnet)
+    ) {
+      routesToAdvertise.push(allocatedProxySubnet);
+    }
+  }
+
   // 6.4 Tailscale Policy Update
   actionSpinner.start("Reconciling Tailscale ACL policy (tagOwners & autoApprovers.routes)");
   const policyRes = await reconcileTailscalePolicy({
@@ -248,6 +321,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     etag: tailnet.etag,
     routerTag: resolvedTag,
     routedSubnet,
+    additionalRoutes: routesToAdvertise.filter((r) => r !== routedSubnet),
     dryRun: cliOptions.dryRun,
   });
   actionSpinner.stop(policyRes.reason);
@@ -270,6 +344,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     existingKey: existingEnv.TS_AUTHKEY,
     routerTag: resolvedTag,
     hostname: resolvedTsHostname,
+    isRegistered: Boolean(existingRouterDevice),
+    forceRotate: cliOptions.rotateAuthKey,
     dryRun: cliOptions.dryRun,
   });
   actionSpinner.stop(
@@ -280,23 +356,33 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
 
   // 6.7 Update Traefik .env
   actionSpinner.start("Updating Traefik .env configuration");
+  const finalRoutesStr = routesToAdvertise.join(",");
+  const traefikDomain = `traefik.${finalZone}`;
   const envUpdates: Record<string, string> = {
     TS_HOSTNAME: resolvedTsHostname,
-    TS_ROUTES: routedSubnet,
+    TS_ROUTES: finalRoutesStr,
     TS_SERVICE_SUBNET: routedSubnet,
     TS_DNS_SERVER: dnsResolverIp,
     TAIL_DOMAIN: finalZone,
     DIRECT_DOMAIN: `dkr.${finalZone}`,
-    TRAEFIK_DOMAIN: `traefik.${finalZone}`,
+    TRAEFIK_DOMAIN: traefikDomain,
     DOCKER_POOL: finalPool.hostPool,
     TS_ROUTER_TAG: resolvedTag,
     TS_AUTHKEY: authKeyRes.authKey,
   };
 
   if (!cliOptions.dryRun) {
+    if (!existsSync(envPath) && existsSync(exampleEnvPath)) {
+      await copyFile(exampleEnvPath, envPath);
+    }
     await mergeEnvFile(envPath, envUpdates);
-    // Also update env/.env.tailscale.local if it exists
+
+    // Also update env/.env.tailscale.local if it exists or seed from example
     const tailscaleEnvPath = resolve(repoRoot, "env/.env.tailscale.local");
+    const tailscaleExamplePath = resolve(repoRoot, "env/.env.tailscale.example");
+    if (!existsSync(tailscaleEnvPath) && existsSync(tailscaleExamplePath)) {
+      await copyFile(tailscaleExamplePath, tailscaleEnvPath);
+    }
     if (existsSync(tailscaleEnvPath)) {
       await mergeEnvFile(tailscaleEnvPath, { TS_AUTHKEY: authKeyRes.authKey });
     }
@@ -330,6 +416,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       routedSubnet,
       routerTag: resolvedTag,
       tsHostname: resolvedTsHostname,
+      routes: routesToAdvertise,
+      traefikDomain,
       apiClient,
     });
 

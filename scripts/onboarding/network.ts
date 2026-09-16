@@ -120,14 +120,23 @@ export function deriveDnsResolverIp(
 /**
  * Proposes a non-overlapping Docker host pool (/18) and a routed subnet (/24) within it.
  * Uses an RFC1918 space, by default candidate blocks in 10.128.0.0/9.
+ *
+ * @param allocatedOrExistingRoutes All discovered routes (local, Docker networks, Tailnet).
+ * @param preferredPool Optional requested or previously configured Docker pool CIDR.
+ * @param ownSubnets Subnets already allocated or owned by this Traefik/Tailscale installation,
+ *                   which must not be treated as conflicting when rerunning or validating preferredPool.
  */
 export function allocateDockerPool(
   allocatedOrExistingRoutes: string[],
   preferredPool?: string,
+  ownSubnets: string[] = [],
 ): { hostPool: string; routedSubnet: string; dnsResolver: string } {
+  const ownSet = new Set(ownSubnets);
+  const externalRoutes = allocatedOrExistingRoutes.filter((route) => !ownSet.has(route));
+
   if (preferredPool && preferredPool !== "auto") {
     const range = parseCidr(preferredPool);
-    const hasConflict = allocatedOrExistingRoutes.some((route) =>
+    const hasConflict = externalRoutes.some((route) =>
       cidrsOverlap(preferredPool, route),
     );
     if (hasConflict) {
@@ -149,7 +158,7 @@ export function allocateDockerPool(
     const candidateInt = (baseStart + i * step) >>> 0;
     const candidateCidr = `${intToIp(candidateInt)}/18`;
 
-    const conflict = allocatedOrExistingRoutes.some((existing) =>
+    const conflict = externalRoutes.some((existing) =>
       cidrsOverlap(candidateCidr, existing),
     );
     if (!conflict) {

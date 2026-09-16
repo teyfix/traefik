@@ -26,13 +26,15 @@ export async function reconcileTailscalePolicy(params: {
   etag?: string;
   routerTag: string;
   routedSubnet: string;
+  additionalRoutes?: string[];
   dryRun?: boolean;
 }): Promise<{ applied: boolean; reason: string }> {
-  const { client, currentPolicy, etag, routerTag, routedSubnet, dryRun } = params;
+  const { client, currentPolicy, etag, routerTag, routedSubnet, additionalRoutes, dryRun } = params;
 
   const { policy: proposedPolicy, changed } = mergeTailscalePolicy(currentPolicy, {
     routerTag,
     routedSubnet,
+    additionalRoutes,
   });
 
   if (!changed) {
@@ -59,17 +61,23 @@ export async function ensureRouterAuthKey(params: {
   existingKey?: string;
   routerTag: string;
   hostname: string;
+  isRegistered?: boolean;
+  forceRotate?: boolean;
   dryRun?: boolean;
 }): Promise<{ authKey: string; generated: boolean }> {
-  const { client, existingKey, routerTag, hostname, dryRun } = params;
+  const { client, existingKey, routerTag, hostname, isRegistered, forceRotate, dryRun } = params;
 
-  const isUsable =
+  const isWellFormed =
     existingKey &&
     existingKey.startsWith("tskey-auth-") &&
     !existingKey.includes("placeholder") &&
     !existingKey.includes("REPLACE_WITH");
 
-  if (isUsable) {
+  // A stored auth key cannot be assumed valid indefinitely:
+  // - If rotation is forced, generate a fresh key.
+  // - If the router device is not yet registered on the tailnet (isRegistered === false),
+  //   a stored key may have expired or been revoked; generate a fresh reusable key.
+  if (isWellFormed && !forceRotate && isRegistered !== false) {
     return { authKey: existingKey, generated: false };
   }
 

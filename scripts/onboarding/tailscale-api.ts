@@ -88,10 +88,10 @@ export class TailscaleApiClient {
   }
 
   /**
-   * Retrieves all devices on the default tailnet.
+   * Retrieves all devices on the default tailnet with all fields included (routes, addresses, tags).
    */
   async getDevices(): Promise<TailscaleDevice[]> {
-    const res = await this.request<{ devices: any[] }>("/tailnet/-/devices");
+    const res = await this.request<{ devices: any[] }>("/tailnet/-/devices?fields=all");
     const rawDevices = res.data.devices || [];
     return rawDevices.map((d) => ({
       id: d.id,
@@ -102,6 +102,19 @@ export class TailscaleApiClient {
       advertisedRoutes: d.advertisedRoutes || [],
       enabledRoutes: d.enabledRoutes || [],
     }));
+  }
+
+  /**
+   * Retrieves advertised and enabled routes for a specific device.
+   */
+  async getDeviceRoutes(deviceId: string): Promise<{ advertisedRoutes: string[]; enabledRoutes: string[] }> {
+    const res = await this.request<{ advertisedRoutes?: string[]; enabledRoutes?: string[] }>(
+      `/device/${deviceId}/routes`,
+    );
+    return {
+      advertisedRoutes: res.data?.advertisedRoutes || [],
+      enabledRoutes: res.data?.enabledRoutes || [],
+    };
   }
 
   /**

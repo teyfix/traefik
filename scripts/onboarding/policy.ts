@@ -24,6 +24,7 @@ export function mergeTailscalePolicy(
     routerTag: string; // e.g. "tag:docker"
     routedSubnet: string; // e.g. "10.128.64.0/24"
     managedPool?: string; // e.g. "10.128.0.0/9"
+    additionalRoutes?: string[]; // e.g. ["172.19.0.0/16"]
   },
 ): { policy: TailscalePolicy; changed: boolean } {
   const policy: TailscalePolicy = JSON.parse(JSON.stringify(currentPolicy || {}));
@@ -56,25 +57,22 @@ export function mergeTailscalePolicy(
     changed = true;
   }
 
-  const routeTarget = options.managedPool || options.routedSubnet;
-  const existingApprovers = policy.autoApprovers.routes[routeTarget];
+  const routesToApprove = [
+    options.routedSubnet,
+    ...(options.additionalRoutes || []),
+  ].filter(Boolean);
 
-  if (!existingApprovers) {
-    policy.autoApprovers.routes[routeTarget] = [tag];
-    changed = true;
-  } else if (!existingApprovers.includes(tag)) {
-    policy.autoApprovers.routes[routeTarget] = [...existingApprovers, tag];
-    changed = true;
+  if (options.managedPool && !routesToApprove.includes(options.managedPool)) {
+    routesToApprove.push(options.managedPool);
   }
 
-  // Also approve the exact routedSubnet if managedPool was specified and differs
-  if (options.managedPool && options.routedSubnet !== options.managedPool) {
-    const subnetApprovers = policy.autoApprovers.routes[options.routedSubnet];
-    if (!subnetApprovers) {
-      policy.autoApprovers.routes[options.routedSubnet] = [tag];
+  for (const routeTarget of routesToApprove) {
+    const existingApprovers = policy.autoApprovers.routes[routeTarget];
+    if (!existingApprovers) {
+      policy.autoApprovers.routes[routeTarget] = [tag];
       changed = true;
-    } else if (!subnetApprovers.includes(tag)) {
-      policy.autoApprovers.routes[options.routedSubnet] = [...subnetApprovers, tag];
+    } else if (!existingApprovers.includes(tag)) {
+      policy.autoApprovers.routes[routeTarget] = [...existingApprovers, tag];
       changed = true;
     }
   }
@@ -95,21 +93,27 @@ export function mergeTailscalePolicy(
   );
 
   if (!hasWildcardAcl && !hasWildcardGrant) {
-    // Check if a grant or ACL for the routedSubnet or tag exists
-    const hasRouteGrant = (policy.grants || []).some((grant) =>
-      grant.dst.includes(options.routedSubnet),
-    );
-    if (!hasRouteGrant) {
-      if (!policy.grants) policy.grants = [];
-      policy.grants.push({
-        src: ["autogroup:member"],
-        dst: [options.routedSubnet],
-        ip: ["*"],
-      });
-      changed = true;
+    for (const route of routesToApprove) {
+      const hasRouteGrant = (policy.grants || []).some((grant) =>
+        grant.dst.includes(route),
+      );
+      const hasRouteAcl = (policy.acls || []).some((acl) =>
+        acl.dst.some((d) => d === `${route}:*` || d === route),
+      );
+
+      if (!hasRouteGrant && !hasRouteAcl) {
+        if (!policy.acls) {
+          policy.acls = [];
+        }
+        policy.acls.push({
+          action: "accept",
+          src: ["autogroup:member"],
+          dst: [`${route}:*`],
+        });
+        changed = true;
+      }
     }
   }
 
   return { policy, changed };
 }
-

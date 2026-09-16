@@ -11,6 +11,28 @@ export interface VerificationResult {
   message?: string;
 }
 
+export function verifyDeviceRoutes(
+  routerDev: { advertisedRoutes?: string[]; enabledRoutes?: string[] },
+  routesToCheck: string[],
+): VerificationResult[] {
+  const results: VerificationResult[] = [];
+  for (const r of routesToCheck) {
+    const advertisesRoute = (routerDev.advertisedRoutes || []).includes(r);
+    const routeApproved = (routerDev.enabledRoutes || []).includes(r);
+
+    results.push({
+      step: `Advertised subnet route approved (${r})`,
+      passed: routeApproved,
+      message: routeApproved
+        ? `Route ${r} is approved and active`
+        : advertisesRoute
+        ? `Route ${r} advertised but pending approval in Tailscale ACL`
+        : `Route ${r} not advertised by router device`,
+    });
+  }
+  return results;
+}
+
 export async function runVerification(params: {
   repoRoot: string;
   dnsZone: string;
@@ -18,6 +40,8 @@ export async function runVerification(params: {
   routedSubnet: string;
   routerTag: string;
   tsHostname: string;
+  routes?: string[] | string;
+  traefikDomain?: string;
   apiClient?: TailscaleApiClient;
 }): Promise<VerificationResult[]> {
   const {
@@ -27,6 +51,8 @@ export async function runVerification(params: {
     routedSubnet,
     routerTag,
     tsHostname,
+    routes,
+    traefikDomain,
     apiClient,
   } = params;
 
@@ -80,24 +106,17 @@ export async function runVerification(params: {
 
       if (routerDev) {
         const hasTag = (routerDev.tags || []).includes(tag);
-        const advertisesRoute = (routerDev.advertisedRoutes || []).includes(routedSubnet);
-        const routeApproved = (routerDev.enabledRoutes || []).includes(routedSubnet);
-
         results.push({
           step: "Tailscale router registered & tagged",
           passed: hasTag,
           message: hasTag ? `Device '${routerDev.name}' has tag ${tag}` : `Tag ${tag} missing on router device`,
         });
 
-        results.push({
-          step: "Advertised subnet route approved",
-          passed: routeApproved || advertisesRoute,
-          message: routeApproved
-            ? `Route ${routedSubnet} is approved and active`
-            : advertisesRoute
-            ? `Route ${routedSubnet} advertised (waiting for propagation)`
-            : `Route ${routedSubnet} not yet advertised`,
-        });
+        const routesToCheck = Array.isArray(routes)
+          ? routes
+          : (routes || routedSubnet || "").split(",").map((s) => s.trim()).filter(Boolean);
+
+        results.push(...verifyDeviceRoutes(routerDev, routesToCheck));
       } else {
         results.push({
           step: "Tailscale router device connected",
@@ -129,7 +148,7 @@ export async function runVerification(params: {
   }
 
   // 5. DNS resolution via CoreDNS
-  const testHost = `traefik.${dnsZone.replace(/^\./, "")}`;
+  const testHost = traefikDomain || `traefik.${dnsZone.replace(/^\./, "")}`;
   const dnsRes = await testDnsResolution(dnsResolverIp, testHost);
   results.push({
     step: `DNS resolution (${testHost} via ${dnsResolverIp})`,
@@ -150,19 +169,26 @@ export async function runVerification(params: {
       : "Step CA root certificate is not yet trusted in host trust store",
   });
 
-  // 7. Traefik HTTPS endpoint reachable
+  // 7. Traefik HTTPS endpoint reachable & certificate validated
   let httpsReachable = false;
   let httpsMsg = "";
   try {
     const proc = Bun.spawn(
-      ["curl", "-k", "-fsS", "--max-time", "5", "https://127.0.0.1:443", "-H", `Host: ${testHost}`],
+      [
+        "curl",
+        "-fsS",
+        "--max-time",
+        "5",
+        "--resolve",
+        `${testHost}:443:127.0.0.1`,
+        `https://${testHost}:443`,
+      ],
       { stdout: "pipe", stderr: "pipe" },
     );
     const code = await proc.exited;
     if (code === 0 || code === 22) {
-      // code 0 or HTTP 404 (curl --fail exits 22 on 404) means TLS handshake succeeded!
       httpsReachable = true;
-      httpsMsg = "Traefik HTTPS entrypoint responds to TLS handshake";
+      httpsMsg = `Traefik HTTPS responds with trusted certificate for ${testHost}`;
     } else {
       const errText = await new Response(proc.stderr).text();
       httpsMsg = `Exit code ${code}: ${errText.trim()}`;
@@ -172,7 +198,7 @@ export async function runVerification(params: {
   }
 
   results.push({
-    step: "Traefik HTTPS reachability",
+    step: "Traefik HTTPS certificate & reachability",
     passed: httpsReachable,
     message: httpsMsg,
   });

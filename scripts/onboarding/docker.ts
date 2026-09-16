@@ -149,11 +149,11 @@ export async function configureDaemonAddressPool(
   });
 
   if (!changed) {
-    return { changed: false, needsReload: false };
+    return { changed: false, restarted: false, needsReload: false };
   }
 
   if (dryRun) {
-    return { changed: true, needsReload: true };
+    return { changed: true, restarted: true, needsReload: true };
   }
 
   const formatted = JSON.stringify(merged, null, 2);
@@ -161,6 +161,24 @@ export async function configureDaemonAddressPool(
   await writeFile(tmpFile, formatted, "utf-8");
 
   try {
+    // Validate configuration before applying
+    try {
+      const valProc = Bun.spawn(["dockerd", "--validate", "--config-file", tmpFile], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const valCode = await valProc.exited;
+      if (valCode !== 0) {
+        const valErr = await new Response(valProc.stderr).text();
+        throw new Error(`Generated daemon.json is invalid: ${valErr.trim()}`);
+      }
+    } catch (valErr) {
+      if ((valErr as Error).message.includes("Generated daemon.json is invalid")) {
+        throw valErr;
+      }
+      // If dockerd binary is not directly executable by current user, proceed to cp
+    }
+
     const cpProc = Bun.spawn(["sudo", "cp", tmpFile, daemonPath], {
       stdout: "pipe",
       stderr: "pipe",
@@ -170,18 +188,15 @@ export async function configureDaemonAddressPool(
       throw new Error(`Failed to write ${daemonPath}`);
     }
 
-    // Try reloading Docker daemon first, fallback to restart
-    const reloadProc = Bun.spawn(["sudo", "systemctl", "reload", "docker"], {
+    // Restart Docker daemon directly to apply default-address-pools
+    const restartProc = Bun.spawn(["sudo", "systemctl", "restart", "docker"], {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const reloadCode = await reloadProc.exited;
-    if (reloadCode !== 0) {
-      const restartProc = Bun.spawn(["sudo", "systemctl", "restart", "docker"], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      await restartProc.exited;
+    const restartCode = await restartProc.exited;
+    if (restartCode !== 0) {
+      const err = await new Response(restartProc.stderr).text();
+      throw new Error(`Failed to restart Docker daemon: ${err.trim()}`);
     }
   } finally {
     try {
@@ -189,7 +204,7 @@ export async function configureDaemonAddressPool(
     } catch {}
   }
 
-  return { changed: true, needsReload: true };
+  return { changed: true, restarted: true, needsReload: true };
 }
 
 export async function ensureDockerNetwork(

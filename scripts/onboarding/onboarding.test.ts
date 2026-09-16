@@ -3,7 +3,7 @@ import { parseCidr, cidrsOverlap, deriveDnsResolverIp, allocateDockerPool } from
 import { parseEnv, updateEnvContent, redactSecret } from "./env";
 import { mergeDaemonJson } from "./docker";
 import { mergeTailscalePolicy } from "./policy";
-import { parseCliArgs, resolveOptionValue } from "./options";
+import { parseCliArgs, resolveOptionValue, DockerPoolSchema, DnsZoneSchema } from "./options";
 import { deriveDnsZoneFromHost } from "./host";
 
 describe("Network & CIDR calculation", () => {
@@ -52,6 +52,17 @@ describe("Network & CIDR calculation", () => {
     expect(pool.hostPool).toBe("10.128.64.0/18");
     expect(pool.routedSubnet).toBe("10.128.64.0/24");
     expect(pool.dnsResolver).toBe("10.128.64.10");
+  });
+
+  test("allows rerun with ownSubnets without self-conflict", () => {
+    const existingRoutes = ["10.128.64.0/24", "172.19.0.0/16", "192.168.1.0/24"];
+    const ownSubnets = ["10.128.64.0/24", "172.19.0.0/16"];
+
+    expect(() => allocateDockerPool(existingRoutes, "10.128.64.0/18")).toThrow();
+
+    const pool = allocateDockerPool(existingRoutes, "10.128.64.0/18", ownSubnets);
+    expect(pool.hostPool).toBe("10.128.64.0/18");
+    expect(pool.routedSubnet).toBe("10.128.64.0/24");
   });
 });
 
@@ -195,6 +206,17 @@ describe("Tailscale Policy minimal merging", () => {
 
     expect(changed).toBe(false);
   });
+
+  test("auto-approves additional routes such as traefik_proxy", () => {
+    const { policy } = mergeTailscalePolicy({}, {
+      routerTag: "tag:docker",
+      routedSubnet: "10.128.64.0/24",
+      additionalRoutes: ["172.19.0.0/16"],
+    });
+
+    expect(policy.autoApprovers?.routes?.["10.128.64.0/24"]).toEqual(["tag:docker"]);
+    expect(policy.autoApprovers?.routes?.["172.19.0.0/16"]).toEqual(["tag:docker"]);
+  });
 });
 
 describe("CLI resolution contract", () => {
@@ -204,13 +226,29 @@ describe("CLI resolution contract", () => {
       "10.128.64.0/18",
       "--ts-dns-zone",
       "dixie.gg",
+      "--rotate-authkey",
       "--yes",
       "--dry-run",
     ]);
     expect(options.dockerPool).toBe("10.128.64.0/18");
     expect(options.tsDnsZone).toBe("dixie.gg");
+    expect(options.rotateAuthKey).toBe(true);
     expect(options.yes).toBe(true);
     expect(options.dryRun).toBe(true);
+  });
+
+  test("validates docker pool schema", () => {
+    expect(DockerPoolSchema.safeParse("auto").success).toBe(true);
+    expect(DockerPoolSchema.safeParse("10.128.64.0/18").success).toBe(true);
+    expect(DockerPoolSchema.safeParse("10.128.64.0/24").success).toBe(false);
+    expect(DockerPoolSchema.safeParse("invalid").success).toBe(false);
+  });
+
+  test("validates DNS zone schema", () => {
+    expect(DnsZoneSchema.safeParse("auto").success).toBe(true);
+    expect(DnsZoneSchema.safeParse("dixie.gg").success).toBe(true);
+    expect(DnsZoneSchema.safeParse("my.custom.zone.test").success).toBe(true);
+    expect(DnsZoneSchema.safeParse("invalid zone with spaces").success).toBe(false);
   });
 
   test("resolves options following the contract", async () => {
@@ -281,6 +319,117 @@ describe("Tailscale API Client semantics", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("getDevices requests fields=all and captures routes", async () => {
+    let capturedUrl = "";
+    const mockFetch = async (url: string | URL | Request) => {
+      capturedUrl = String(url);
+      return new Response(
+        JSON.stringify({
+          devices: [
+            {
+              id: "12345",
+              name: "my-router",
+              hostname: "my-router",
+              tags: ["tag:docker"],
+              advertisedRoutes: ["10.128.64.0/24"],
+              enabledRoutes: ["10.128.64.0/24"],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const { TailscaleApiClient } = await import("./tailscale-api");
+      const client = new TailscaleApiClient("mock-token");
+      const devices = await client.getDevices();
+
+      expect(capturedUrl).toContain("/tailnet/-/devices?fields=all");
+      expect(devices[0]?.advertisedRoutes).toEqual(["10.128.64.0/24"]);
+      expect(devices[0]?.enabledRoutes).toEqual(["10.128.64.0/24"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("ensureRouterAuthKey regenerates key when unregistered or forced", async () => {
+    let keysCreated = 0;
+    const mockFetch = async () => {
+      keysCreated++;
+      return new Response(JSON.stringify({ key: "fresh-auth-key" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const { TailscaleApiClient } = await import("./tailscale-api");
+      const { ensureRouterAuthKey } = await import("./tailscale");
+      const client = new TailscaleApiClient("mock-token");
+
+      // An unregistered device (isRegistered: false) with old key triggers regeneration
+      const safeExistingKey = ["tskey", "auth", "oldvalidkey123"].join("-");
+      const res1 = await ensureRouterAuthKey({
+        client,
+        existingKey: safeExistingKey,
+        routerTag: "tag:docker",
+        hostname: "router",
+        isRegistered: false,
+      });
+      expect(res1.generated).toBe(true);
+      expect(res1.authKey).toBe("fresh-auth-key");
+
+      // If registered (isRegistered: true) and forceRotate is false, reuses existing key
+      const res2 = await ensureRouterAuthKey({
+        client,
+        existingKey: safeExistingKey,
+        routerTag: "tag:docker",
+        hostname: "router",
+        isRegistered: true,
+      });
+      expect(res2.generated).toBe(false);
+      expect(res2.authKey).toBe(safeExistingKey);
+
+      // If forceRotate is true, generates new key even if registered
+      const res3 = await ensureRouterAuthKey({
+        client,
+        existingKey: safeExistingKey,
+        routerTag: "tag:docker",
+        hostname: "router",
+        isRegistered: true,
+        forceRotate: true,
+      });
+      expect(res3.generated).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("route verification marks advertised-but-unapproved as failed", async () => {
+    const { verifyDeviceRoutes } = await import("./verify");
+    const routerDev = {
+      advertisedRoutes: ["10.128.64.0/24"],
+      enabledRoutes: [], // Advertised, but not approved!
+    };
+
+    const results = verifyDeviceRoutes(routerDev, ["10.128.64.0/24"]);
+    expect(results[0]?.passed).toBe(false);
+    expect(results[0]?.message).toContain("pending approval in Tailscale ACL");
+
+    const approvedDev = {
+      advertisedRoutes: ["10.128.64.0/24"],
+      enabledRoutes: ["10.128.64.0/24"],
+    };
+    const approvedResults = verifyDeviceRoutes(approvedDev, ["10.128.64.0/24"]);
+    expect(approvedResults[0]?.passed).toBe(true);
+    expect(approvedResults[0]?.message).toContain("approved and active");
   });
 
   test("policy write does not occur when policy validation fails", async () => {
