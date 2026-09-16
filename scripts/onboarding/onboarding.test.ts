@@ -51,6 +51,7 @@ describe("Network & CIDR calculation", () => {
     const pool = allocateDockerPool(existingRoutes);
     expect(pool.hostPool).toBe("10.128.64.0/18");
     expect(pool.routedSubnet).toBe("10.128.64.0/24");
+    expect(pool.proxySubnet).toBe("10.128.65.0/24");
     expect(pool.dnsResolver).toBe("10.128.64.10");
   });
 
@@ -63,6 +64,7 @@ describe("Network & CIDR calculation", () => {
     const pool = allocateDockerPool(existingRoutes, "10.128.64.0/18", ownSubnets);
     expect(pool.hostPool).toBe("10.128.64.0/18");
     expect(pool.routedSubnet).toBe("10.128.64.0/24");
+    expect(pool.proxySubnet).toBe("10.128.65.0/24");
   });
 });
 
@@ -371,39 +373,59 @@ describe("Tailscale API Client semantics", () => {
     globalThis.fetch = mockFetch as any;
     try {
       const { TailscaleApiClient } = await import("./tailscale-api");
-      const { ensureRouterAuthKey } = await import("./tailscale");
+      const { ensureRouterAuthKey, findRouterDevice } = await import("./tailscale");
       const client = new TailscaleApiClient("mock-token");
 
-      // An unregistered device (isRegistered: false) with old key triggers regeneration
+      // findRouterDevice matches strictly by hostname and never falls back to tag
+      const devices = [
+        {
+          id: "1",
+          name: "other-host-router.tailnet.ts.net",
+          hostname: "other-host-router",
+          tags: ["tag:docker"],
+          advertisedRoutes: ["10.200.0.0/24"],
+        },
+        {
+          id: "2",
+          name: "my-router.tailnet.ts.net",
+          hostname: "my-router",
+          tags: ["tag:docker"],
+          advertisedRoutes: ["10.128.64.0/24"],
+        },
+      ];
+      expect(findRouterDevice(devices as any, "my-router")?.id).toBe("2");
+      expect(findRouterDevice(devices as any, "unknown-router")).toBeUndefined();
+
+      // When local state is missing (hasLocalState: false), old key triggers regeneration
       const safeExistingKey = ["tskey", "auth", "oldvalidkey123"].join("-");
       const res1 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
         routerTag: "tag:docker",
         hostname: "router",
-        isRegistered: false,
+        hasLocalState: false,
       });
       expect(res1.generated).toBe(true);
       expect(res1.authKey).toBe("fresh-auth-key");
 
-      // If registered (isRegistered: true) and forceRotate is false, reuses existing key
+      // If local state is present (hasLocalState: true) and forceRotate is false, reuses existing key
       const res2 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
         routerTag: "tag:docker",
         hostname: "router",
-        isRegistered: true,
+        hasLocalState: true,
       });
       expect(res2.generated).toBe(false);
       expect(res2.authKey).toBe(safeExistingKey);
 
-      // If forceRotate is true, generates new key even if registered
+      // If forceRotate is true, generates new key even if local state is present
       const res3 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
         routerTag: "tag:docker",
         hostname: "router",
-        isRegistered: true,
+        hasLocalState: true,
         forceRotate: true,
       });
       expect(res3.generated).toBe(true);

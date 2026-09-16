@@ -56,16 +56,32 @@ export async function reconcileTailscalePolicy(params: {
   return { applied: true, reason: "Policy updated successfully." };
 }
 
+export function findRouterDevice(
+  devices: TailscaleDevice[],
+  tsHostname: string,
+): TailscaleDevice | undefined {
+  const target = tsHostname.toLowerCase();
+  return devices.find((d) => {
+    const devHostname = (d.hostname || "").toLowerCase();
+    const devName = (d.name || "").toLowerCase();
+    return (
+      devHostname === target ||
+      devName === target ||
+      devName.startsWith(`${target}.`)
+    );
+  });
+}
+
 export async function ensureRouterAuthKey(params: {
   client: TailscaleApiClient;
   existingKey?: string;
   routerTag: string;
   hostname: string;
-  isRegistered?: boolean;
+  hasLocalState?: boolean;
   forceRotate?: boolean;
   dryRun?: boolean;
 }): Promise<{ authKey: string; generated: boolean }> {
-  const { client, existingKey, routerTag, hostname, isRegistered, forceRotate, dryRun } = params;
+  const { client, existingKey, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
 
   const isWellFormed =
     existingKey &&
@@ -73,11 +89,11 @@ export async function ensureRouterAuthKey(params: {
     !existingKey.includes("placeholder") &&
     !existingKey.includes("REPLACE_WITH");
 
-  // A stored auth key cannot be assumed valid indefinitely:
-  // - If rotation is forced, generate a fresh key.
-  // - If the router device is not yet registered on the tailnet (isRegistered === false),
-  //   a stored key may have expired or been revoked; generate a fresh reusable key.
-  if (isWellFormed && !forceRotate && isRegistered !== false) {
+  // Reusable auth keys expire after at most 90 days.
+  // Remote device registration does not prove a stored key remains valid for state-loss recovery.
+  // Only reuse the existing key if local state is already present and intact on this host.
+  // When local state is missing (fresh bootstrap or volume wipe recovery) or when forced, generate a fresh key.
+  if (isWellFormed && !forceRotate && hasLocalState) {
     return { authKey: existingKey, generated: false };
   }
 

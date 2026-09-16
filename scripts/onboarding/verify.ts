@@ -3,6 +3,7 @@ import { testDnsResolution } from "./dns";
 import { isRootCaTrusted } from "./certificates";
 import { getTraefikServicesStatus } from "./traefik";
 import type { TailscaleApiClient } from "./tailscale-api";
+import { findRouterDevice } from "./tailscale";
 import { resolve } from "node:path";
 
 export interface VerificationResult {
@@ -100,16 +101,16 @@ export async function runVerification(params: {
     try {
       const devices = await apiClient.getDevices();
       const tag = routerTag.startsWith("tag:") ? routerTag : `tag:${routerTag}`;
-      const routerDev = devices.find(
-        (d) => d.name.includes(tsHostname) || d.hostname.includes(tsHostname) || (d.tags && d.tags.includes(tag)),
-      );
+      const routerDev = findRouterDevice(devices, tsHostname);
 
       if (routerDev) {
         const hasTag = (routerDev.tags || []).includes(tag);
         results.push({
           step: "Tailscale router registered & tagged",
           passed: hasTag,
-          message: hasTag ? `Device '${routerDev.name}' has tag ${tag}` : `Tag ${tag} missing on router device`,
+          message: hasTag
+            ? `Device '${routerDev.name}' has tag ${tag}`
+            : `Tag ${tag} missing on router device '${routerDev.name}'`,
         });
 
         const routesToCheck = Array.isArray(routes)
@@ -121,7 +122,7 @@ export async function runVerification(params: {
         results.push({
           step: "Tailscale router device connected",
           passed: false,
-          message: `Router device with hostname '${tsHostname}' or tag '${tag}' not yet found on tailnet`,
+          message: `Router device with hostname '${tsHostname}' not found on tailnet`,
         });
       }
 

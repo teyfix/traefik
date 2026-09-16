@@ -134,7 +134,7 @@ export function mergeDaemonJson(
 export async function configureDaemonAddressPool(
   poolCidr: string,
   dryRun = false,
-): Promise<{ changed: boolean; needsReload: boolean }> {
+): Promise<{ changed: boolean; restarted: boolean; needsReload: boolean }> {
   const daemonPath = "/etc/docker/daemon.json";
   let existingContent = "";
   if (existsSync(daemonPath)) {
@@ -211,6 +211,7 @@ export async function ensureDockerNetwork(
   networkName: string,
   driver = "bridge",
   dryRun = false,
+  subnet?: string,
 ): Promise<void> {
   try {
     const inspectProc = Bun.spawn(["docker", "network", "inspect", networkName], {
@@ -223,13 +224,39 @@ export async function ensureDockerNetwork(
 
   if (dryRun) return;
 
-  const createProc = Bun.spawn(
-    ["docker", "network", "create", "--driver", driver, networkName],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const args = ["docker", "network", "create", "--driver", driver];
+  if (subnet) {
+    args.push("--subnet", subnet);
+  }
+  args.push(networkName);
+
+  const createProc = Bun.spawn(args, {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const createCode = await createProc.exited;
   if (createCode !== 0) {
     const err = await new Response(createProc.stderr).text();
     throw new Error(`Failed to create Docker network ${networkName}: ${err}`);
+  }
+}
+
+export async function hasLocalTailscaleState(): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["docker", "volume", "inspect", "traefik_tailscale"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await proc.exited;
+    if (code !== 0) return false;
+
+    const inspectProc = Bun.spawn(
+      ["docker", "inspect", "-f", "{{.State.Status}}", "traefik_tailscale"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const inspectCode = await inspectProc.exited;
+    return inspectCode === 0;
+  } catch {
+    return false;
   }
 }

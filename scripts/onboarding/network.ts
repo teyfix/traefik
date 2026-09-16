@@ -126,11 +126,18 @@ export function deriveDnsResolverIp(
  * @param ownSubnets Subnets already allocated or owned by this Traefik/Tailscale installation,
  *                   which must not be treated as conflicting when rerunning or validating preferredPool.
  */
+export interface DockerPoolAllocation {
+  hostPool: string;
+  routedSubnet: string;
+  proxySubnet: string;
+  dnsResolver: string;
+}
+
 export function allocateDockerPool(
   allocatedOrExistingRoutes: string[],
   preferredPool?: string,
   ownSubnets: string[] = [],
-): { hostPool: string; routedSubnet: string; dnsResolver: string } {
+): DockerPoolAllocation {
   const ownSet = new Set(ownSubnets);
   const externalRoutes = allocatedOrExistingRoutes.filter((route) => !ownSet.has(route));
 
@@ -142,10 +149,12 @@ export function allocateDockerPool(
     if (hasConflict) {
       throw new Error(`Requested Docker pool ${preferredPool} conflicts with existing routes.`);
     }
-    // Subnet is first /24 within the pool
-    const routedSubnet = `${range.ip}/24`;
+    // Subnet 0 is first /24 within the pool (tailscale_services)
+    const routedSubnet = `${intToIp(range.startInt)}/24`;
+    // Subnet 1 is second /24 within the pool (traefik_proxy)
+    const proxySubnet = `${intToIp(range.startInt + 256)}/24`;
     const dnsResolver = deriveDnsResolverIp(routedSubnet, 10);
-    return { hostPool: range.cidr, routedSubnet, dnsResolver };
+    return { hostPool: range.cidr, routedSubnet, proxySubnet, dnsResolver };
   }
 
   // Generate candidate /18 pools in 10.128.0.0/9 (each /18 has 16384 IPs = step of 64 in 3rd octet if 2nd octet fixed, or 256 /24s)
@@ -163,8 +172,9 @@ export function allocateDockerPool(
     );
     if (!conflict) {
       const routedSubnet = `${intToIp(candidateInt)}/24`;
+      const proxySubnet = `${intToIp(candidateInt + 256)}/24`;
       const dnsResolver = deriveDnsResolverIp(routedSubnet, 10);
-      return { hostPool: candidateCidr, routedSubnet, dnsResolver };
+      return { hostPool: candidateCidr, routedSubnet, proxySubnet, dnsResolver };
     }
   }
 

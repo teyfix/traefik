@@ -16,6 +16,7 @@ import {
   inspectDockerNetworks,
   configureDaemonAddressPool,
   ensureDockerNetwork,
+  hasLocalTailscaleState,
 } from "./docker";
 import { allocateDockerPool, deriveDnsResolverIp, cidrsOverlap } from "./network";
 import { TailscaleApiClient } from "./tailscale-api";
@@ -24,6 +25,7 @@ import {
   reconcileTailscalePolicy,
   ensureRouterAuthKey,
   reconcileSplitDns,
+  findRouterDevice,
   type TailnetDiscovery,
 } from "./tailscale";
 import { parseEnv, mergeEnvFile, redactSecret } from "./env";
@@ -100,7 +102,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     inspectDockerNetworks(),
   ]);
 
-  // Check existing .env or .example.env in repo
+  // Check existing .env in repo (do not treat template .example.env as live state)
   const envPath = resolve(repoRoot, ".env");
   const exampleEnvPath = resolve(repoRoot, ".example.env");
   let existingEnv: Record<string, string> = {};
@@ -108,11 +110,11 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     try {
       existingEnv = parseEnv(await readFile(envPath, "utf-8"));
     } catch {}
-  } else if (existsSync(exampleEnvPath)) {
-    try {
-      existingEnv = parseEnv(await readFile(exampleEnvPath, "utf-8"));
-    } catch {}
   }
+
+  // Resolve router hostname candidate early for device identity lookup
+  const defaultTsHostname = `${hostShort}-router`;
+  const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
 
   // Identify subnets owned by this installation so reruns do not treat them as external conflicts
   const ownSubnets: string[] = [];
@@ -133,13 +135,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     }
   }
 
-  // Also include advertised routes of any existing router device on tailnet
-  const existingRouterDevice = tailnet.devices.find(
-    (d) =>
-      d.name.includes(hostShort) ||
-      d.hostname.includes(hostShort) ||
-      (d.tags && d.tags.includes(cliOptions.tsRouterTag)),
-  );
+  // Include advertised routes of any existing router device on tailnet matching this exact hostname
+  const existingRouterDevice = findRouterDevice(tailnet.devices, resolvedTsHostname);
   if (existingRouterDevice?.advertisedRoutes) {
     for (const r of existingRouterDevice.advertisedRoutes) {
       if (!ownSubnets.includes(r)) ownSubnets.push(r);
@@ -186,13 +183,19 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       ? recommendedPool
       : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets);
 
-  // Compute final routed subnet & DNS resolver IP belonging to the routed subnet
-  const routedSubnet = finalPool.routedSubnet; // e.g. 10.128.64.0/24
+  // Compute final routed subnet (first /24) & DNS resolver IP belonging to the routed subnet
+  const routedSubnet = finalPool.routedSubnet; // e.g. 10.128.64.0/24 for tailscale_services
   const dnsResolverIp = deriveDnsResolverIp(
     routedSubnet,
     10,
     existingEnv.TS_DNS_SERVER,
   );
+
+  // Determine proxy subnet deterministically:
+  // - If traefik_proxy already exists in Docker, preserve its existing subnet.
+  // - Otherwise (fresh install), use finalPool.proxySubnet (the second /24 in hostPool).
+  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
+  const proxySubnet = proxyNet?.subnets[0] || finalPool.proxySubnet;
 
   // 5.2 Private DNS Zone
   const recommendedZone = deriveDnsZoneFromHost(hostShort, "gg");
@@ -226,20 +229,14 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     ? cliOptions.tsRouterTag
     : `tag:${cliOptions.tsRouterTag}`;
 
-  // 5.4 Router Hostname
-  const defaultTsHostname = `${hostShort}-router`;
-  const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
-
-  // Determine routes to advertise (both TS_SERVICE_SUBNET and traefik_proxy if separate)
-  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
-  const existingProxySubnet = proxyNet?.subnets[0];
+  // Routes to advertise (both TS_SERVICE_SUBNET and traefik_proxy)
   const routesToAdvertise: string[] = [routedSubnet];
   if (
-    existingProxySubnet &&
-    existingProxySubnet !== routedSubnet &&
-    !cidrsOverlap(routedSubnet, existingProxySubnet)
+    proxySubnet &&
+    proxySubnet !== routedSubnet &&
+    !cidrsOverlap(routedSubnet, proxySubnet)
   ) {
-    routesToAdvertise.push(existingProxySubnet);
+    routesToAdvertise.push(proxySubnet);
   }
 
   // Display Configuration Summary
@@ -247,7 +244,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     [
       `Host:             ${hostShort}`,
       `Docker pool:       ${finalPool.hostPool}`,
-      `Routed subnet:     ${routedSubnet}`,
+      `Service subnet:    ${routedSubnet}`,
+      `Proxy subnet:      ${proxySubnet}`,
       `Advertised routes: ${routesToAdvertise.join(", ")}`,
       `DNS resolver IP:   ${dnsResolverIp}`,
       `Private DNS zone:  ${finalZone}`,
@@ -295,23 +293,10 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       : "Docker daemon address pool already up-to-date",
   );
 
-  // 6.3 Docker external proxy network
-  actionSpinner.start("Ensuring Docker 'traefik_proxy' network exists");
-  await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun);
+  // 6.3 Docker external proxy network (explicit deterministic subnet)
+  actionSpinner.start(`Ensuring Docker 'traefik_proxy' network exists (${proxySubnet})`);
+  await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun, proxySubnet);
   actionSpinner.stop("Docker 'traefik_proxy' network verified");
-
-  if (!cliOptions.dryRun) {
-    const updatedNetworks = await inspectDockerNetworks();
-    const currentProxy = updatedNetworks.find((n) => n.name === "traefik_proxy");
-    const allocatedProxySubnet = currentProxy?.subnets[0];
-    if (
-      allocatedProxySubnet &&
-      !routesToAdvertise.includes(allocatedProxySubnet) &&
-      !cidrsOverlap(routedSubnet, allocatedProxySubnet)
-    ) {
-      routesToAdvertise.push(allocatedProxySubnet);
-    }
-  }
 
   // 6.4 Tailscale Policy Update
   actionSpinner.start("Reconciling Tailscale ACL policy (tagOwners & autoApprovers.routes)");
@@ -337,14 +322,15 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
   actionSpinner.stop(splitRes.reason);
 
-  // 6.6 Tailscale Router Reusable Auth Key
+  // 6.6 Tailscale Router Reusable Auth Key (based on local state availability)
   actionSpinner.start(`Ensuring reusable auth key for ${resolvedTag}`);
+  const localStatePresent = await hasLocalTailscaleState();
   const authKeyRes = await ensureRouterAuthKey({
     client: apiClient,
     existingKey: existingEnv.TS_AUTHKEY,
     routerTag: resolvedTag,
     hostname: resolvedTsHostname,
-    isRegistered: Boolean(existingRouterDevice),
+    hasLocalState: localStatePresent,
     forceRotate: cliOptions.rotateAuthKey,
     dryRun: cliOptions.dryRun,
   });
