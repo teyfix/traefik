@@ -1,11 +1,12 @@
 import { readFile, unlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 
 export interface DockerNetworkInfo {
   name: string;
   id: string;
   driver: string;
   subnets: string[];
+  containers?: string[];
 }
 
 export async function isDockerInstalled(): Promise<boolean> {
@@ -92,6 +93,7 @@ export async function inspectDockerNetworks(): Promise<DockerNetworkInfo[]> {
         id: item.Id,
         driver: item.Driver,
         subnets,
+        containers: item.Containers ? Object.keys(item.Containers) : [],
       };
     });
   } catch {
@@ -241,21 +243,49 @@ export async function ensureDockerNetwork(
   }
 }
 
-export async function hasLocalTailscaleState(): Promise<boolean> {
+export async function hasLocalTailscaleState(
+  tailscaleImage = "tailscale/tailscale:v1.102.3",
+): Promise<boolean> {
   try {
     const proc = Bun.spawn(["docker", "volume", "inspect", "traefik_tailscale"], {
       stdout: "pipe",
       stderr: "pipe",
     });
+    const stdout = await new Response(proc.stdout).text();
     const code = await proc.exited;
     if (code !== 0) return false;
 
-    const inspectProc = Bun.spawn(
-      ["docker", "inspect", "-f", "{{.State.Status}}", "traefik_tailscale"],
+    // Fast path: direct filesystem inspection if accessible
+    try {
+      const [vol] = JSON.parse(stdout);
+      if (vol?.Mountpoint) {
+        const stateFile = `${vol.Mountpoint}/tailscaled.state`;
+        if (existsSync(stateFile) && statSync(stateFile).size > 0) {
+          return true;
+        }
+      }
+    } catch {
+      // EACCES or other FS error, fall back to Docker container execution
+    }
+
+    // Inspect the actual state file inside the volume via a lightweight container execution
+    const checkProc = Bun.spawn(
+      [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/bin/sh",
+        "-v",
+        "traefik_tailscale:/var/lib/tailscale:ro",
+        tailscaleImage,
+        "-c",
+        "test -s /var/lib/tailscale/tailscaled.state",
+      ],
       { stdout: "pipe", stderr: "pipe" },
     );
-    const inspectCode = await inspectProc.exited;
-    return inspectCode === 0;
+    const checkCode = await checkProc.exited;
+    return checkCode === 0;
   } catch {
     return false;
   }

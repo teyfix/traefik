@@ -125,6 +125,7 @@ export function deriveDnsResolverIp(
  * @param preferredPool Optional requested or previously configured Docker pool CIDR.
  * @param ownSubnets Subnets already allocated or owned by this Traefik/Tailscale installation,
  *                   which must not be treated as conflicting when rerunning or validating preferredPool.
+ * @param localDockerSubnets Subnets belonging to local Docker networks on this daemon.
  */
 export interface DockerPoolAllocation {
   hostPool: string;
@@ -137,22 +138,54 @@ export function allocateDockerPool(
   allocatedOrExistingRoutes: string[],
   preferredPool?: string,
   ownSubnets: string[] = [],
+  localDockerSubnets: string[] = [],
 ): DockerPoolAllocation {
   const ownSet = new Set(ownSubnets);
+  const localDockerSet = new Set(localDockerSubnets);
   const externalRoutes = allocatedOrExistingRoutes.filter((route) => !ownSet.has(route));
+
+  const isRouteContainedInPool = (route: string, poolRange: ReturnType<typeof parseCidr>): boolean => {
+    try {
+      const r = parseCidr(route);
+      return r.startInt >= poolRange.startInt && r.endInt <= poolRange.endInt;
+    } catch {
+      return false;
+    }
+  };
+
+  const hasPoolConflict = (poolRange: ReturnType<typeof parseCidr>): boolean => {
+    return externalRoutes.some((route) => {
+      // Local Docker network subnets contained inside the pool don't conflict with the pool itself
+      if (localDockerSet.has(route) && isRouteContainedInPool(route, poolRange)) {
+        return false;
+      }
+      return cidrsOverlap(poolRange.cidr, route);
+    });
+  };
+
+  const findSubnetsInPool = (poolRange: ReturnType<typeof parseCidr>): { routedSubnet: string; proxySubnet: string } => {
+    const available: string[] = [];
+    for (let s = 0; s < 64; s++) {
+      const cand = `${intToIp((poolRange.startInt + s * 256) >>> 0)}/24`;
+      const inUse = externalRoutes.some((r) => cidrsOverlap(cand, r));
+      if (!inUse) {
+        available.push(cand);
+        if (available.length === 2) break;
+      }
+    }
+    const [routed, proxy] = available;
+    if (!routed || !proxy) {
+      throw new Error(`Docker pool ${poolRange.cidr} has insufficient free /24 subnets.`);
+    }
+    return { routedSubnet: routed, proxySubnet: proxy };
+  };
 
   if (preferredPool && preferredPool !== "auto") {
     const range = parseCidr(preferredPool);
-    const hasConflict = externalRoutes.some((route) =>
-      cidrsOverlap(preferredPool, route),
-    );
-    if (hasConflict) {
+    if (hasPoolConflict(range)) {
       throw new Error(`Requested Docker pool ${preferredPool} conflicts with existing routes.`);
     }
-    // Subnet 0 is first /24 within the pool (tailscale_services)
-    const routedSubnet = `${intToIp(range.startInt)}/24`;
-    // Subnet 1 is second /24 within the pool (traefik_proxy)
-    const proxySubnet = `${intToIp(range.startInt + 256)}/24`;
+    const { routedSubnet, proxySubnet } = findSubnetsInPool(range);
     const dnsResolver = deriveDnsResolverIp(routedSubnet, 10);
     return { hostPool: range.cidr, routedSubnet, proxySubnet, dnsResolver };
   }
@@ -165,16 +198,16 @@ export function allocateDockerPool(
 
   for (let i = 0; i < maxPools; i++) {
     const candidateInt = (baseStart + i * step) >>> 0;
-    const candidateCidr = `${intToIp(candidateInt)}/18`;
+    const candidateRange = parseCidr(`${intToIp(candidateInt)}/18`);
 
-    const conflict = externalRoutes.some((existing) =>
-      cidrsOverlap(candidateCidr, existing),
-    );
-    if (!conflict) {
-      const routedSubnet = `${intToIp(candidateInt)}/24`;
-      const proxySubnet = `${intToIp(candidateInt + 256)}/24`;
-      const dnsResolver = deriveDnsResolverIp(routedSubnet, 10);
-      return { hostPool: candidateCidr, routedSubnet, proxySubnet, dnsResolver };
+    if (!hasPoolConflict(candidateRange)) {
+      try {
+        const { routedSubnet, proxySubnet } = findSubnetsInPool(candidateRange);
+        const dnsResolver = deriveDnsResolverIp(routedSubnet, 10);
+        return { hostPool: candidateRange.cidr, routedSubnet, proxySubnet, dnsResolver };
+      } catch {
+        // Pool lacks sufficient free subnets, check next candidate
+      }
     }
   }
 

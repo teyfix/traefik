@@ -116,10 +116,10 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const defaultTsHostname = `${hostShort}-router`;
   const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
 
-  // Identify subnets owned by this installation so reruns do not treat them as external conflicts
+  // Identify subnets owned by tailscale_services so reruns do not treat them as external conflicts
   const ownSubnets: string[] = [];
   for (const net of dockerNetworks) {
-    if (net.name === "tailscale_services" || net.name === "traefik_proxy") {
+    if (net.name === "tailscale_services") {
       ownSubnets.push(...net.subnets);
     }
   }
@@ -143,15 +143,22 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     }
   }
 
+  const localDockerSubnets = dockerNetworks.flatMap((n) => n.subnets);
+
   const existingSubnets = [
     ...localRoutes,
-    ...dockerNetworks.flatMap((n) => n.subnets),
+    ...localDockerSubnets,
     ...tailnet.routes,
   ];
 
   // Phase 5: Option resolution
   // 5.1 Docker pool
-  const recommendedPool = allocateDockerPool(existingSubnets, existingEnv.DOCKER_POOL, ownSubnets);
+  const recommendedPool = allocateDockerPool(
+    existingSubnets,
+    existingEnv.DOCKER_POOL,
+    ownSubnets,
+    localDockerSubnets,
+  );
   const resolvedPoolInput = await resolveOptionValue({
     cliValue: cliOptions.dockerPool,
     defaultValue: recommendedPool.hostPool,
@@ -181,7 +188,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const finalPool =
     resolvedPoolInput === "auto"
       ? recommendedPool
-      : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets);
+      : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets, localDockerSubnets);
 
   // Compute final routed subnet (first /24) & DNS resolver IP belonging to the routed subnet
   const routedSubnet = finalPool.routedSubnet; // e.g. 10.128.64.0/24 for tailscale_services
@@ -192,10 +199,30 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   );
 
   // Determine proxy subnet deterministically:
-  // - If traefik_proxy already exists in Docker, preserve its existing subnet.
-  // - Otherwise (fresh install), use finalPool.proxySubnet (the second /24 in hostPool).
+  // - If traefik_proxy already exists in Docker and does not collide with routedSubnet, preserve its subnet.
+  // - If traefik_proxy collides with routedSubnet:
+  //   - If it has no active containers, flag for recreation with finalPool.proxySubnet in Phase 6.
+  //   - If it has active containers, reject with an explicit error to prevent container disruption.
+  // - Otherwise (fresh install), use finalPool.proxySubnet.
   const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
-  const proxySubnet = proxyNet?.subnets[0] || finalPool.proxySubnet;
+  const existingProxySubnet = proxyNet?.subnets[0];
+  let proxySubnet = finalPool.proxySubnet;
+  let needsProxyRecreate = false;
+
+  if (existingProxySubnet) {
+    if (cidrsOverlap(routedSubnet, existingProxySubnet)) {
+      const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
+      if (hasContainers) {
+        throw new Error(
+          `Existing Docker network 'traefik_proxy' (${existingProxySubnet}) collides with routed subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
+        );
+      }
+      needsProxyRecreate = true;
+      proxySubnet = finalPool.proxySubnet;
+    } else {
+      proxySubnet = existingProxySubnet;
+    }
+  }
 
   // 5.2 Private DNS Zone
   const recommendedZone = deriveDnsZoneFromHost(hostShort, "gg");
@@ -294,6 +321,14 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   );
 
   // 6.3 Docker external proxy network (explicit deterministic subnet)
+  if (needsProxyRecreate && !cliOptions.dryRun) {
+    actionSpinner.start("Recreating colliding 'traefik_proxy' network");
+    await Bun.spawn(["docker", "network", "rm", "traefik_proxy"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exited;
+    actionSpinner.stop("Removed colliding 'traefik_proxy' network");
+  }
   actionSpinner.start(`Ensuring Docker 'traefik_proxy' network exists (${proxySubnet})`);
   await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun, proxySubnet);
   actionSpinner.stop("Docker 'traefik_proxy' network verified");
@@ -324,7 +359,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
 
   // 6.6 Tailscale Router Reusable Auth Key (based on local state availability)
   actionSpinner.start(`Ensuring reusable auth key for ${resolvedTag}`);
-  const localStatePresent = await hasLocalTailscaleState();
+  const tailscaleImage = existingEnv.TAILSCALE_IMAGE || process.env.TAILSCALE_IMAGE;
+  const localStatePresent = await hasLocalTailscaleState(tailscaleImage);
   const authKeyRes = await ensureRouterAuthKey({
     client: apiClient,
     existingKey: existingEnv.TS_AUTHKEY,
@@ -413,6 +449,14 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       } else {
         p.log.error(`✗ ${r.step}: ${r.message || "Failed"}`);
       }
+    }
+
+    const failures = verifyResults.filter((r) => !r.passed);
+    if (failures.length > 0) {
+      p.cancel(
+        `Onboarding finished with ${failures.length} verification failure(s). Check the log messages above for details.`,
+      );
+      process.exit(1);
     }
   } else {
     p.log.info("Dry run complete. No mutations were applied to host or tailnet.");

@@ -66,6 +66,20 @@ describe("Network & CIDR calculation", () => {
     expect(pool.routedSubnet).toBe("10.128.64.0/24");
     expect(pool.proxySubnet).toBe("10.128.65.0/24");
   });
+
+  test("avoids existing traefik_proxy subnet collision when allocating routed subnet", () => {
+    // traefik_proxy already exists at 10.128.64.0/24, so it is in existingRoutes and localDockerSubnets, but NOT in ownSubnets
+    const existingRoutes = ["10.128.64.0/24"];
+    const ownSubnets: string[] = [];
+    const localDockerSubnets = ["10.128.64.0/24"];
+
+    const pool = allocateDockerPool(existingRoutes, "10.128.64.0/18", ownSubnets, localDockerSubnets);
+    expect(pool.hostPool).toBe("10.128.64.0/18");
+    // routedSubnet must skip 10.128.64.0/24 and take 10.128.65.0/24
+    expect(pool.routedSubnet).toBe("10.128.65.0/24");
+    expect(pool.proxySubnet).toBe("10.128.66.0/24");
+    expect(pool.dnsResolver).toBe("10.128.65.10");
+  });
 });
 
 describe("Host & DNS Zone derivation", () => {
@@ -520,6 +534,57 @@ describe("Tailscale API Client semantics", () => {
       }
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("Docker & state discovery semantics", () => {
+  test("hasLocalTailscaleState inspects volume state file and handles absence/presence", async () => {
+    const { hasLocalTailscaleState } = await import("./docker");
+    const originalSpawn = Bun.spawn;
+    try {
+      // 1. Volume missing -> returns false
+      Bun.spawn = ((cmd: string[]) => {
+        if (cmd[1] === "volume") {
+          return { exited: Promise.resolve(1), stdout: new Response(""), stderr: new Response("") };
+        }
+        return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
+      }) as any;
+      expect(await hasLocalTailscaleState()).toBe(false);
+
+      // 2. Volume exists, state file present in container -> returns true
+      Bun.spawn = ((cmd: string[]) => {
+        if (cmd[1] === "volume") {
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Response(JSON.stringify([{ Mountpoint: "/nonexistent-path-force-container-check" }])),
+            stderr: new Response(""),
+          };
+        }
+        if (cmd[1] === "run") {
+          return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
+        }
+        return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
+      }) as any;
+      expect(await hasLocalTailscaleState()).toBe(true);
+
+      // 3. Volume exists, state file missing in container -> returns false
+      Bun.spawn = ((cmd: string[]) => {
+        if (cmd[1] === "volume") {
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Response(JSON.stringify([{ Mountpoint: "/nonexistent-path-force-container-check" }])),
+            stderr: new Response(""),
+          };
+        }
+        if (cmd[1] === "run") {
+          return { exited: Promise.resolve(1), stdout: new Response(""), stderr: new Response("") };
+        }
+        return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
+      }) as any;
+      expect(await hasLocalTailscaleState()).toBe(false);
+    } finally {
+      Bun.spawn = originalSpawn;
     }
   });
 });
