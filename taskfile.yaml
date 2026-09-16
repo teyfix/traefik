@@ -6,6 +6,10 @@ tasks:
       - bun run typecheck
       - bun test
       - bun run check:agent-rules
+  onboard:
+    desc: Runs the idempotent Traefik/Tailscale onboarding CLI
+    cmds:
+      - bun scripts/onboarding.ts {{.CLI_ARGS}}
   up:
     desc: Starts or recreates all services
     cmds:

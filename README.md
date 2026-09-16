@@ -73,15 +73,27 @@ cd traefik
 
 Make sure you're inside the cloned folder before running any of the next steps.
 
-### 2. Configure Tailscale
+### 2. Run the Onboarding CLI
 
-First complete the [onboarding questionnaire](compose/tailscale/ONBOARDING.md)
-with the current Tailnet administrator. Existing DNS zones, route owners, and
-the target machine's subnets determine the setup. Do not copy these values to
-another host until that conflict check is complete.
+Run the idempotent onboarding CLI to automatically inspect your host and tailnet, discover non-conflicting Docker address pools, configure Tailscale policy, register split DNS, provision the router auth key, and verify Step CA certificates:
 
-Copy the example environment and replace its placeholders with the approved
-non-secret network values and first-registration auth key for this installation:
+```bash
+# Interactive mode
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts
+
+# Non-interactive automatic mode
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --docker-pool auto --ts-dns-zone auto --yes
+
+# Dry run (plan mutations without applying changes)
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --dry-run
+```
+
+`TS_API_TOKEN` is transient and never written to disk. The onboarding process automatically generates a reusable tagged router auth key (`TS_AUTHKEY`) and persists it to `.env` for hands-off router recovery.
+
+### 3. Manual Configuration (Alternative)
+
+If preferred, you can complete the [onboarding questionnaire](compose/tailscale/ONBOARDING.md)
+with the current Tailnet administrator and configure `.env` manually:
 
 ```bash
 cp .example.env .env
