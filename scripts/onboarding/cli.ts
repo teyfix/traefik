@@ -35,6 +35,22 @@ import { runVerification } from "./verify";
 import { existsSync } from "node:fs";
 import { readFile, copyFile, chmod } from "node:fs/promises";
 
+async function removeDockerNetwork(networkName: string): Promise<void> {
+  const proc = Bun.spawn(["docker", "network", "rm", networkName], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stderr).text(),
+  ]);
+  if (code !== 0) {
+    throw new Error(
+      `Failed to remove Docker network '${networkName}': ${stderr.trim() || `exit code ${code}`}`,
+    );
+  }
+}
+
 export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
   let cliOptions: RawCliOptions;
   try {
@@ -190,38 +206,9 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       ? recommendedPool
       : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets, localDockerSubnets);
 
-  // Determine proxy subnet deterministically:
-  // - If traefik_proxy already exists in Docker and does not collide with finalPool.routedSubnet, preserve its subnet.
-  // - If traefik_proxy collides with finalPool.routedSubnet:
-  //   - If it has no active containers, flag for recreation with finalPool.proxySubnet in Phase 6.
-  //   - If it has active containers, reject with an explicit error to prevent container disruption.
-  // - Otherwise (fresh install), use finalPool.proxySubnet.
-  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
-  const existingProxySubnet = proxyNet?.subnets[0];
-  let proxySubnet = finalPool.proxySubnet;
-  let needsProxyRecreate = false;
-
-  if (existingProxySubnet) {
-    if (cidrsOverlap(finalPool.routedSubnet, existingProxySubnet)) {
-      const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
-      if (hasContainers) {
-        throw new Error(
-          `Existing Docker network 'traefik_proxy' (${existingProxySubnet}) collides with routed subnet '${finalPool.routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
-        );
-      }
-      needsProxyRecreate = true;
-      proxySubnet = finalPool.proxySubnet;
-    } else {
-      proxySubnet = existingProxySubnet;
-    }
-  }
-
-  // Determine service subnet deterministically:
-  // - If tailscale_services already exists in Docker (or configured in .env), preserve its subnet when compatible with hostPool.
-  // - If tailscale_services is incompatible with hostPool or collides with proxySubnet:
-  //   - If it has active containers, reject with an explicit error to prevent container disruption.
-  //   - If it has no active containers, flag for recreation on finalPool.routedSubnet in Phase 6.
-  // - Otherwise (fresh install), use finalPool.routedSubnet.
+  // Resolve the service subnet first. Existing service state is the authoritative routed subnet
+  // on reruns, so proxy migration decisions must be made against this effective value rather
+  // than the allocator's tentative routedSubnet.
   const servicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
   const existingServicesSubnet = servicesNet?.subnets[0] || existingEnv.TS_SERVICE_SUBNET;
   let routedSubnet = finalPool.routedSubnet;
@@ -230,10 +217,10 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   if (existingServicesSubnet) {
     let isCompatible = false;
     try {
+      const parsedServicesSubnet = parseCidr(existingServicesSubnet);
       isCompatible =
-        isIpInCidr(parseCidr(existingServicesSubnet).ip, finalPool.hostPool) &&
-        parseCidr(existingServicesSubnet).prefix >= 24 &&
-        !cidrsOverlap(existingServicesSubnet, proxySubnet);
+        isIpInCidr(parsedServicesSubnet.ip, finalPool.hostPool) &&
+        parsedServicesSubnet.prefix === 24;
     } catch {
       isCompatible = false;
     }
@@ -249,6 +236,36 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       }
       needsServicesRecreate = true;
     }
+  }
+
+  // Resolve the proxy subnet after the effective service subnet is known.
+  // - Preserve a non-overlapping existing proxy subnet.
+  // - Recreate an empty colliding proxy network.
+  // - Reject migration when a colliding proxy still has attached containers.
+  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
+  const existingProxySubnet = proxyNet?.subnets[0];
+  let proxySubnet = finalPool.proxySubnet;
+  let needsProxyRecreate = false;
+
+  if (existingProxySubnet) {
+    if (cidrsOverlap(routedSubnet, existingProxySubnet)) {
+      const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
+      if (hasContainers) {
+        throw new Error(
+          `Existing Docker network 'traefik_proxy' (${existingProxySubnet}) collides with routed subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
+        );
+      }
+      needsProxyRecreate = true;
+      proxySubnet = cidrsOverlap(finalPool.proxySubnet, routedSubnet)
+        ? finalPool.routedSubnet
+        : finalPool.proxySubnet;
+    } else {
+      proxySubnet = existingProxySubnet;
+    }
+  } else if (cidrsOverlap(proxySubnet, routedSubnet)) {
+    // When preserving a legacy service subnet, the allocator's second candidate may be that
+    // same subnet. The allocator's first candidate is guaranteed distinct, so use it instead.
+    proxySubnet = finalPool.routedSubnet;
   }
 
   const dnsResolverIp = deriveDnsResolverIp(
@@ -387,18 +404,12 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   // 6.3 Docker external proxy network (explicit deterministic subnet)
   if (needsProxyRecreate && !cliOptions.dryRun) {
     actionSpinner.start("Recreating colliding 'traefik_proxy' network");
-    await Bun.spawn(["docker", "network", "rm", "traefik_proxy"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    }).exited;
+    await removeDockerNetwork("traefik_proxy");
     actionSpinner.stop("Removed colliding 'traefik_proxy' network");
   }
   if (needsServicesRecreate && !cliOptions.dryRun) {
     actionSpinner.start("Recreating legacy 'tailscale_services' network");
-    await Bun.spawn(["docker", "network", "rm", "tailscale_services"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    }).exited;
+    await removeDockerNetwork("tailscale_services");
     actionSpinner.stop("Removed legacy 'tailscale_services' network");
   }
   actionSpinner.start(`Ensuring Docker 'traefik_proxy' network exists (${proxySubnet})`);
