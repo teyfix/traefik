@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 export function redactSecret(secret?: string): string {
@@ -79,4 +79,5 @@ export async function mergeEnvFile(
   }
   const merged = updateEnvContent(original, updates);
   await writeFile(filePath, merged, { mode: 0o600 });
+  await chmod(filePath, 0o600).catch(() => {});
 }

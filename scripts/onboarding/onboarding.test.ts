@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { statSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { parseCidr, cidrsOverlap, deriveDnsResolverIp, allocateDockerPool } from "./network";
-import { parseEnv, updateEnvContent, redactSecret } from "./env";
+import { parseEnv, updateEnvContent, mergeEnvFile, redactSecret } from "./env";
 import { mergeDaemonJson } from "./docker";
 import { mergeTailscalePolicy } from "./policy";
 import { parseCliArgs, resolveOptionValue, DockerPoolSchema, DnsZoneSchema } from "./options";
@@ -136,6 +138,18 @@ TS_HOSTNAME="old-host"
     expect(redactSecret("")).toBe("");
     expect(redactSecret("12345678")).toBe("********");
     expect(redactSecret("secret-auth-k1234567890abcdef")).toBe("secr...cdef");
+  });
+
+  test("mergeEnvFile tightens permissions to 0o600", async () => {
+    const tmpFile = `/tmp/test-env-${Date.now()}.env`;
+    try {
+      await Bun.write(tmpFile, "FOO=bar\n");
+      await mergeEnvFile(tmpFile, { BAZ: "qux" });
+      const stats = statSync(tmpFile);
+      expect(stats.mode & 0o777).toBe(0o600);
+    } finally {
+      await unlink(tmpFile).catch(() => {});
+    }
   });
 });
 
@@ -337,7 +351,7 @@ describe("Tailscale API Client semantics", () => {
     }
   });
 
-  test("getDevices requests fields=all and captures routes", async () => {
+  test("getDevices requests fields=all and captures routes with Go client casing", async () => {
     let capturedUrl = "";
     const mockFetch = async (url: string | URL | Request) => {
       capturedUrl = String(url);
@@ -348,9 +362,9 @@ describe("Tailscale API Client semantics", () => {
               id: "12345",
               name: "my-router",
               hostname: "my-router",
-              tags: ["tag:docker"],
-              advertisedRoutes: ["10.128.64.0/24"],
-              enabledRoutes: ["10.128.64.0/24"],
+              Tags: ["tag:docker"],
+              AdvertisedRoutes: ["10.128.64.0/24"],
+              EnabledRoutes: ["10.128.64.0/24"],
             },
           ],
         }),
@@ -368,9 +382,43 @@ describe("Tailscale API Client semantics", () => {
       expect(capturedUrl).toContain("/tailnet/-/devices?fields=all");
       expect(devices[0]?.advertisedRoutes).toEqual(["10.128.64.0/24"]);
       expect(devices[0]?.enabledRoutes).toEqual(["10.128.64.0/24"]);
+      expect(devices[0]?.tags).toEqual(["tag:docker"]);
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("reconcileSplitDns rejects conflicting existing resolver without forceReplace", async () => {
+    const { reconcileSplitDns } = await import("./tailscale");
+    const { TailscaleApiClient } = await import("./tailscale-api");
+    const client = new TailscaleApiClient("mock-token");
+    let patchCalled = false;
+    client.updateSplitDns = async () => {
+      patchCalled = true;
+    };
+
+    // 1. Conflict without forceReplace throws error
+    expect(
+      reconcileSplitDns({
+        client,
+        currentSplitDns: { "example.gg": ["1.2.3.4"] },
+        dnsZone: "example.gg",
+        dnsResolverIp: "10.128.64.10",
+      }),
+    ).rejects.toThrow("Conflict: Split DNS zone");
+
+    expect(patchCalled).toBe(false);
+
+    // 2. Conflict with forceReplace succeeds
+    const res = await reconcileSplitDns({
+      client,
+      currentSplitDns: { "example.gg": ["1.2.3.4"] },
+      dnsZone: "example.gg",
+      dnsResolverIp: "10.128.64.10",
+      forceReplace: true,
+    });
+    expect(res.applied).toBe(true);
+    expect(patchCalled).toBe(true);
   });
 
   test("ensureRouterAuthKey regenerates key when unregistered or forced", async () => {
@@ -583,6 +631,25 @@ describe("Docker & state discovery semantics", () => {
         return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
       }) as any;
       expect(await hasLocalTailscaleState()).toBe(false);
+
+      // 4. In dry-run mode, skips docker run completely
+      let dockerRunCalled = false;
+      Bun.spawn = ((cmd: string[]) => {
+        if (cmd[1] === "volume") {
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Response(JSON.stringify([{ Mountpoint: "/nonexistent-path-force-container-check" }])),
+            stderr: new Response(""),
+          };
+        }
+        if (cmd[1] === "run") {
+          dockerRunCalled = true;
+          return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
+        }
+        return { exited: Promise.resolve(0), stdout: new Response(""), stderr: new Response("") };
+      }) as any;
+      expect(await hasLocalTailscaleState("tailscale:image", true)).toBe(true);
+      expect(dockerRunCalled).toBe(false);
     } finally {
       Bun.spawn = originalSpawn;
     }

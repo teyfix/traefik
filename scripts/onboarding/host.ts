@@ -33,22 +33,21 @@ export async function checkIpForwarding(): Promise<boolean> {
 }
 
 export async function ensureIpForwarding(dryRun = false): Promise<void> {
-  const isForwarding = await checkIpForwarding();
-  if (isForwarding) {
-    return;
-  }
   if (dryRun) {
     return;
   }
 
-  // Apply immediately via sysctl
-  const proc = Bun.spawn(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], {
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    throw new Error(`Failed to set net.ipv4.ip_forward=1 (exit code: ${code})`);
+  const isForwarding = await checkIpForwarding();
+  if (!isForwarding) {
+    // Apply immediately via sysctl
+    const proc = Bun.spawn(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const code = await proc.exited;
+    if (code !== 0) {
+      throw new Error(`Failed to set net.ipv4.ip_forward=1 (exit code: ${code})`);
+    }
   }
 
   // Persist idempotently into /etc/sysctl.d/99-tailscale.conf

@@ -18,7 +18,7 @@ import {
   ensureDockerNetwork,
   hasLocalTailscaleState,
 } from "./docker";
-import { allocateDockerPool, deriveDnsResolverIp, cidrsOverlap } from "./network";
+import { allocateDockerPool, deriveDnsResolverIp, cidrsOverlap, isIpInCidr, parseCidr } from "./network";
 import { TailscaleApiClient } from "./tailscale-api";
 import {
   inspectTailnet,
@@ -33,7 +33,7 @@ import { installRootCa } from "./certificates";
 import { startTraefikStack, waitForTraefikHealthy } from "./traefik";
 import { runVerification } from "./verify";
 import { existsSync } from "node:fs";
-import { readFile, copyFile } from "node:fs/promises";
+import { readFile, copyFile, chmod } from "node:fs/promises";
 
 export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
   let cliOptions: RawCliOptions;
@@ -190,17 +190,9 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       ? recommendedPool
       : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets, localDockerSubnets);
 
-  // Compute final routed subnet (first /24) & DNS resolver IP belonging to the routed subnet
-  const routedSubnet = finalPool.routedSubnet; // e.g. 10.128.64.0/24 for tailscale_services
-  const dnsResolverIp = deriveDnsResolverIp(
-    routedSubnet,
-    10,
-    existingEnv.TS_DNS_SERVER,
-  );
-
   // Determine proxy subnet deterministically:
-  // - If traefik_proxy already exists in Docker and does not collide with routedSubnet, preserve its subnet.
-  // - If traefik_proxy collides with routedSubnet:
+  // - If traefik_proxy already exists in Docker and does not collide with finalPool.routedSubnet, preserve its subnet.
+  // - If traefik_proxy collides with finalPool.routedSubnet:
   //   - If it has no active containers, flag for recreation with finalPool.proxySubnet in Phase 6.
   //   - If it has active containers, reject with an explicit error to prevent container disruption.
   // - Otherwise (fresh install), use finalPool.proxySubnet.
@@ -210,11 +202,11 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   let needsProxyRecreate = false;
 
   if (existingProxySubnet) {
-    if (cidrsOverlap(routedSubnet, existingProxySubnet)) {
+    if (cidrsOverlap(finalPool.routedSubnet, existingProxySubnet)) {
       const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
       if (hasContainers) {
         throw new Error(
-          `Existing Docker network 'traefik_proxy' (${existingProxySubnet}) collides with routed subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
+          `Existing Docker network 'traefik_proxy' (${existingProxySubnet}) collides with routed subnet '${finalPool.routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
         );
       }
       needsProxyRecreate = true;
@@ -223,6 +215,47 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       proxySubnet = existingProxySubnet;
     }
   }
+
+  // Determine service subnet deterministically:
+  // - If tailscale_services already exists in Docker (or configured in .env), preserve its subnet when compatible with hostPool.
+  // - If tailscale_services is incompatible with hostPool or collides with proxySubnet:
+  //   - If it has active containers, reject with an explicit error to prevent container disruption.
+  //   - If it has no active containers, flag for recreation on finalPool.routedSubnet in Phase 6.
+  // - Otherwise (fresh install), use finalPool.routedSubnet.
+  const servicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
+  const existingServicesSubnet = servicesNet?.subnets[0] || existingEnv.TS_SERVICE_SUBNET;
+  let routedSubnet = finalPool.routedSubnet;
+  let needsServicesRecreate = false;
+
+  if (existingServicesSubnet) {
+    let isCompatible = false;
+    try {
+      isCompatible =
+        isIpInCidr(parseCidr(existingServicesSubnet).ip, finalPool.hostPool) &&
+        parseCidr(existingServicesSubnet).prefix >= 24 &&
+        !cidrsOverlap(existingServicesSubnet, proxySubnet);
+    } catch {
+      isCompatible = false;
+    }
+
+    if (isCompatible) {
+      routedSubnet = existingServicesSubnet;
+    } else if (servicesNet) {
+      const hasContainers = Boolean(servicesNet.containers && servicesNet.containers.length > 0);
+      if (hasContainers) {
+        throw new Error(
+          `Existing Docker network 'tailscale_services' (${servicesNet.subnets[0]}) is on an incompatible subnet and has active containers. Stop running services ('docker compose down') before migrating to the new pool.`,
+        );
+      }
+      needsServicesRecreate = true;
+    }
+  }
+
+  const dnsResolverIp = deriveDnsResolverIp(
+    routedSubnet,
+    10,
+    existingEnv.TS_DNS_SERVER,
+  );
 
   // 5.2 Private DNS Zone
   const recommendedZone = deriveDnsZoneFromHost(hostShort, "gg");
@@ -250,6 +283,24 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
 
   const finalZone = (resolvedZone === "auto" ? recommendedZone : resolvedZone).toLowerCase();
+  let forceReplaceDns = false;
+  const existingZoneResolvers = tailnet.splitDns[finalZone] || [];
+  if (existingZoneResolvers.length > 0 && !existingZoneResolvers.includes(dnsResolverIp)) {
+    if (cliOptions.yes) {
+      throw new Error(
+        `Conflict: Split DNS zone '${finalZone}' already exists on tailnet pointing to [${existingZoneResolvers.join(", ")}]. Refusing to overwrite existing zone without explicit confirmation.`,
+      );
+    }
+    const confirmReplace = await p.confirm({
+      message: `Split DNS zone '${finalZone}' already points to [${existingZoneResolvers.join(", ")}]. Replace existing resolver with ${dnsResolverIp}?`,
+      initialValue: false,
+    });
+    if (p.isCancel(confirmReplace) || !confirmReplace) {
+      p.cancel("Onboarding cancelled due to DNS zone conflict.");
+      process.exit(0);
+    }
+    forceReplaceDns = true;
+  }
 
   // 5.3 Router Tag
   const resolvedTag = cliOptions.tsRouterTag.startsWith("tag:")
@@ -329,6 +380,14 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     }).exited;
     actionSpinner.stop("Removed colliding 'traefik_proxy' network");
   }
+  if (needsServicesRecreate && !cliOptions.dryRun) {
+    actionSpinner.start("Recreating legacy 'tailscale_services' network");
+    await Bun.spawn(["docker", "network", "rm", "tailscale_services"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exited;
+    actionSpinner.stop("Removed legacy 'tailscale_services' network");
+  }
   actionSpinner.start(`Ensuring Docker 'traefik_proxy' network exists (${proxySubnet})`);
   await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun, proxySubnet);
   actionSpinner.stop("Docker 'traefik_proxy' network verified");
@@ -353,6 +412,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     currentSplitDns: tailnet.splitDns,
     dnsZone: finalZone,
     dnsResolverIp,
+    forceReplace: forceReplaceDns,
     dryRun: cliOptions.dryRun,
   });
   actionSpinner.stop(splitRes.reason);
@@ -360,7 +420,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   // 6.6 Tailscale Router Reusable Auth Key (based on local state availability)
   actionSpinner.start(`Ensuring reusable auth key for ${resolvedTag}`);
   const tailscaleImage = existingEnv.TAILSCALE_IMAGE || process.env.TAILSCALE_IMAGE;
-  const localStatePresent = await hasLocalTailscaleState(tailscaleImage);
+  const localStatePresent = await hasLocalTailscaleState(tailscaleImage, cliOptions.dryRun);
   const authKeyRes = await ensureRouterAuthKey({
     client: apiClient,
     existingKey: existingEnv.TS_AUTHKEY,
@@ -396,6 +456,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   if (!cliOptions.dryRun) {
     if (!existsSync(envPath) && existsSync(exampleEnvPath)) {
       await copyFile(exampleEnvPath, envPath);
+      await chmod(envPath, 0o600).catch(() => {});
     }
     await mergeEnvFile(envPath, envUpdates);
 
@@ -404,6 +465,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     const tailscaleExamplePath = resolve(repoRoot, "env/.env.tailscale.example");
     if (!existsSync(tailscaleEnvPath) && existsSync(tailscaleExamplePath)) {
       await copyFile(tailscaleExamplePath, tailscaleEnvPath);
+      await chmod(tailscaleEnvPath, 0o600).catch(() => {});
     }
     if (existsSync(tailscaleEnvPath)) {
       await mergeEnvFile(tailscaleEnvPath, { TS_AUTHKEY: authKeyRes.authKey });

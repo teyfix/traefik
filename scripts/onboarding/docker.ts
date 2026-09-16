@@ -245,6 +245,7 @@ export async function ensureDockerNetwork(
 
 export async function hasLocalTailscaleState(
   tailscaleImage = "tailscale/tailscale:v1.102.3",
+  dryRun = false,
 ): Promise<boolean> {
   try {
     const proc = Bun.spawn(["docker", "volume", "inspect", "traefik_tailscale"], {
@@ -266,6 +267,11 @@ export async function hasLocalTailscaleState(
       }
     } catch {
       // EACCES or other FS error, fall back to Docker container execution
+    }
+
+    // In dry-run mode, skip container execution and image pulling to guarantee zero mutations
+    if (dryRun) {
+      return true;
     }
 
     // Inspect the actual state file inside the volume via a lightweight container execution

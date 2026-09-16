@@ -97,10 +97,10 @@ export class TailscaleApiClient {
       id: d.id,
       name: d.name,
       hostname: d.hostname,
-      tags: d.tags || [],
-      addresses: d.addresses || [],
-      advertisedRoutes: d.advertisedRoutes || [],
-      enabledRoutes: d.enabledRoutes || [],
+      tags: d.tags || d.Tags || [],
+      addresses: d.addresses || d.Addresses || [],
+      advertisedRoutes: d.AdvertisedRoutes || d.advertisedRoutes || [],
+      enabledRoutes: d.EnabledRoutes || d.enabledRoutes || [],
     }));
   }
 
@@ -108,12 +108,16 @@ export class TailscaleApiClient {
    * Retrieves advertised and enabled routes for a specific device.
    */
   async getDeviceRoutes(deviceId: string): Promise<{ advertisedRoutes: string[]; enabledRoutes: string[] }> {
-    const res = await this.request<{ advertisedRoutes?: string[]; enabledRoutes?: string[] }>(
-      `/device/${deviceId}/routes`,
-    );
+    const res = await this.request<{
+      advertisedRoutes?: string[];
+      AdvertisedRoutes?: string[];
+      enabledRoutes?: string[];
+      EnabledRoutes?: string[];
+    }>(`/device/${deviceId}/routes`);
+    const raw = res.data || {};
     return {
-      advertisedRoutes: res.data?.advertisedRoutes || [],
-      enabledRoutes: res.data?.enabledRoutes || [],
+      advertisedRoutes: raw.AdvertisedRoutes || raw.advertisedRoutes || [],
+      enabledRoutes: raw.EnabledRoutes || raw.enabledRoutes || [],
     };
   }
 

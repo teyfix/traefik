@@ -114,14 +114,21 @@ export async function reconcileSplitDns(params: {
   currentSplitDns: Record<string, string[]>;
   dnsZone: string;
   dnsResolverIp: string;
+  forceReplace?: boolean;
   dryRun?: boolean;
 }): Promise<{ applied: boolean; reason: string }> {
-  const { client, currentSplitDns, dnsZone, dnsResolverIp, dryRun } = params;
+  const { client, currentSplitDns, dnsZone, dnsResolverIp, forceReplace, dryRun } = params;
   const cleanZone = dnsZone.replace(/^\./, "").toLowerCase();
 
   const existingResolvers = currentSplitDns[cleanZone] || [];
   if (existingResolvers.includes(dnsResolverIp)) {
     return { applied: false, reason: `Split DNS for ${cleanZone} already points to ${dnsResolverIp}.` };
+  }
+
+  if (existingResolvers.length > 0 && !forceReplace) {
+    throw new Error(
+      `Conflict: Split DNS zone '${cleanZone}' already exists on tailnet pointing to [${existingResolvers.join(", ")}]. Refusing to overwrite existing zone without explicit confirmation.`,
+    );
   }
 
   if (dryRun) {
