@@ -20,7 +20,7 @@ services:
       TS_ENABLE_HEALTH_CHECK: "true"
       TS_FORWARD_MSS: ${TS_FORWARD_MSS:?}
       TS_HOSTNAME: ${TS_HOSTNAME:?}
-      TS_ROUTES: ${TS_ROUTES:?}
+      TS_ROUTES: ${TS_ROUTES:-}
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
     env_file:
