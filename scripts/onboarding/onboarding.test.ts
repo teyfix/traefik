@@ -1,11 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { statSync } from "node:fs";
 import { unlink } from "node:fs/promises";
-import { parseCidr, cidrsOverlap, deriveDnsResolverIp, allocateDockerPool } from "./network";
+import {
+  parseCidr,
+  cidrsOverlap,
+  deriveDnsResolverIp,
+  deriveTraefikIp,
+  is10Slash24,
+  checkIngressSubnetOwnership,
+  allocateIngressSubnet,
+  allocateDockerPool,
+} from "./network";
 import { parseEnv, updateEnvContent, mergeEnvFile, redactSecret } from "./env";
 import { mergeDaemonJson } from "./docker";
 import { mergeTailscalePolicy } from "./policy";
-import { parseCliArgs, resolveOptionValue, DockerPoolSchema, DnsZoneSchema } from "./options";
+import {
+  parseCliArgs,
+  resolveOptionValue,
+  IngressSubnetSchema,
+  DockerPoolSchema,
+  DnsZoneSchema,
+} from "./options";
 import { deriveDnsZoneFromHost } from "./host";
 
 describe("Network & CIDR calculation", () => {
@@ -99,6 +114,119 @@ describe("Network & CIDR calculation", () => {
     const expectedInt = (baseStart + 40 * step) >>> 0;
     const expectedIp = [(expectedInt >>> 24) & 255, (expectedInt >>> 16) & 255, (expectedInt >>> 8) & 255, expectedInt & 255].join(".");
     expect(pool.hostPool).toBe(`${expectedIp}/18`);
+  });
+
+  test("derives Traefik IP from routed ingress subnet", () => {
+    // Given 10.128.64.0/24, offset 2 should be 10.128.64.2
+    const ip = deriveTraefikIp("10.128.64.0/24", 2);
+    expect(ip).toBe("10.128.64.2");
+
+    // Preserves existing valid IP if inside routed subnet
+    const existing = deriveTraefikIp("10.128.64.0/24", 2, "10.128.64.20");
+    expect(existing).toBe("10.128.64.20");
+
+    // Rejects invalid offsets
+    expect(() => deriveTraefikIp("10.128.64.0/24", 0)).toThrow();
+    expect(() => deriveTraefikIp("10.128.64.0/24", 255)).toThrow();
+  });
+
+  test("validates is10Slash24 correctly", () => {
+    expect(is10Slash24("10.128.64.0/24")).toBe(true);
+    expect(is10Slash24("10.0.1.0/24")).toBe(true);
+    expect(is10Slash24("10.255.255.0/24")).toBe(true);
+    expect(is10Slash24("172.16.0.0/24")).toBe(false);
+    expect(is10Slash24("192.168.1.0/24")).toBe(false);
+    expect(is10Slash24("10.128.64.0/18")).toBe(false);
+  });
+
+  test("checkIngressSubnetOwnership validates unambiguous ownership", () => {
+    const devices = [
+      {
+        id: "dev-1",
+        hostname: "other-router",
+        name: "other-router.tailnet.ts.net",
+        advertisedRoutes: ["10.128.1.0/24"],
+        enabledRoutes: ["10.128.1.0/24"],
+      },
+      {
+        id: "dev-2",
+        hostname: "my-host-router",
+        name: "my-host-router.tailnet.ts.net",
+        advertisedRoutes: ["10.128.64.0/24"],
+        enabledRoutes: ["10.128.64.0/24"],
+      },
+    ];
+
+    // Unambiguous: owned by current router and not conflicting
+    const check1 = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.64.0/24",
+      tailnetDevices: devices,
+      routerHostname: "my-host-router",
+      localRoutes: ["192.168.1.0/24"],
+    });
+    expect(check1.unambiguous).toBe(true);
+
+    // Ambiguous / conflicting: claimed by another tailnet device (even if offline)
+    const check2 = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.1.0/24",
+      tailnetDevices: devices,
+      routerHostname: "my-host-router",
+      localRoutes: ["192.168.1.0/24"],
+    });
+    expect(check2.unambiguous).toBe(false);
+    expect(check2.reason).toContain("claimed by another tailnet device");
+
+    // Ambiguous: overlaps with local host route
+    const check3 = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.64.0/24",
+      tailnetDevices: devices,
+      routerHostname: "my-host-router",
+      localRoutes: ["10.128.64.0/24"],
+    });
+    expect(check3.unambiguous).toBe(false);
+    expect(check3.reason).toContain("overlaps with local host route");
+
+    // Ambiguous: not 10.* /24
+    const check4 = checkIngressSubnetOwnership({
+      candidateSubnet: "172.20.0.0/24",
+      tailnetDevices: devices,
+      routerHostname: "my-host-router",
+    });
+    expect(check4.unambiguous).toBe(false);
+  });
+
+  test("allocateIngressSubnet allocates unique 10.* /24 per host and derives static IPs", () => {
+    const claimedRoutes = [
+      "10.128.0.0/24", // claimed by offline device
+      "10.128.1.0/24", // claimed by another device
+      "192.168.1.0/24", // local route
+    ];
+
+    const alloc = allocateIngressSubnet({ claimedRoutes });
+    expect(alloc.ingressSubnet).toBe("10.128.2.0/24");
+    expect(alloc.dnsResolverIp).toBe("10.128.2.10");
+    expect(alloc.traefikIp).toBe("10.128.2.2");
+  });
+
+  test("allocateIngressSubnet preserves unambiguousSubnet without self-conflict", () => {
+    const claimedRoutes = ["10.128.64.0/24", "10.128.1.0/24"];
+    const alloc = allocateIngressSubnet({
+      claimedRoutes,
+      unambiguousSubnet: "10.128.64.0/24",
+    });
+    expect(alloc.ingressSubnet).toBe("10.128.64.0/24");
+    expect(alloc.dnsResolverIp).toBe("10.128.64.10");
+    expect(alloc.traefikIp).toBe("10.128.64.2");
+  });
+
+  test("allocateIngressSubnet rejects conflicting preferred subnet", () => {
+    const claimedRoutes = ["10.128.5.0/24"];
+    expect(() =>
+      allocateIngressSubnet({
+        claimedRoutes,
+        preferredSubnet: "10.128.5.0/24",
+      }),
+    ).toThrow("conflicts with claimed route");
   });
 });
 
@@ -270,6 +398,8 @@ describe("Tailscale Policy minimal merging", () => {
 describe("CLI resolution contract", () => {
   test("parses explicit CLI flags", () => {
     const options = parseCliArgs([
+      "--ingress-subnet",
+      "10.128.64.0/24",
       "--docker-pool",
       "10.128.64.0/18",
       "--ts-dns-zone",
@@ -279,12 +409,22 @@ describe("CLI resolution contract", () => {
       "--yes",
       "--dry-run",
     ]);
+    expect(options.ingressSubnet).toBe("10.128.64.0/24");
     expect(options.dockerPool).toBe("10.128.64.0/18");
     expect(options.tsDnsZone).toBe("dixie.gg");
     expect(options.rotateAuthKey).toBe(true);
     expect(options.replaceSplitDns).toBe(true);
     expect(options.yes).toBe(true);
     expect(options.dryRun).toBe(true);
+  });
+
+  test("validates ingress subnet schema", () => {
+    expect(IngressSubnetSchema.safeParse("auto").success).toBe(true);
+    expect(IngressSubnetSchema.safeParse("10.128.64.0/24").success).toBe(true);
+    expect(IngressSubnetSchema.safeParse("10.0.1.0/24").success).toBe(true);
+    expect(IngressSubnetSchema.safeParse("172.16.0.0/24").success).toBe(false);
+    expect(IngressSubnetSchema.safeParse("10.128.64.0/18").success).toBe(false);
+    expect(IngressSubnetSchema.safeParse("invalid").success).toBe(false);
   });
 
   test("validates docker pool schema", () => {
@@ -362,10 +502,11 @@ describe("Tailscale API Client semantics", () => {
       const key = await client.createAuthKey({ tag: "tag:docker" });
 
       expect(key).toBe("mock-auth-test-key");
-      expect(capturedBody.capabilities.devices.create.reusable).toBe(true);
+      expect(capturedBody.capabilities.devices.create.reusable).toBe(false);
       expect(capturedBody.capabilities.devices.create.ephemeral).toBe(false);
       expect(capturedBody.capabilities.devices.create.preauthorized).toBe(true);
       expect(capturedBody.capabilities.devices.create.tags).toEqual(["tag:docker"]);
+      expect(capturedBody.expirySeconds).toBe(3600);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -513,7 +654,7 @@ describe("Tailscale API Client semantics", () => {
       expect(res1.generated).toBe(true);
       expect(res1.authKey).toBe("fresh-auth-key");
 
-      // If local state is present (hasLocalState: true) and forceRotate is false, reuses existing key
+      // If local state is present (hasLocalState: true) and forceRotate is false, reuses persistent volume state
       const res2 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
@@ -522,7 +663,8 @@ describe("Tailscale API Client semantics", () => {
         hasLocalState: true,
       });
       expect(res2.generated).toBe(false);
-      expect(res2.authKey).toBe(safeExistingKey);
+      expect(res2.needed).toBe(false);
+      expect(res2.authKey).toBe("");
 
       // If forceRotate is true, generates new key even if local state is present
       const res3 = await ensureRouterAuthKey({
@@ -557,6 +699,52 @@ describe("Tailscale API Client semantics", () => {
     const approvedResults = verifyDeviceRoutes(approvedDev, ["10.128.64.0/24"]);
     expect(approvedResults[0]?.passed).toBe(true);
     expect(approvedResults[0]?.message).toContain("approved and active");
+  });
+
+  test("pollRouterDeviceAndRoutes polls and resolves router status", async () => {
+    const { pollRouterDeviceAndRoutes } = await import("./verify");
+    let callCount = 0;
+    const fakeClient = {
+      getDevices: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return [
+            {
+              id: "dev-1",
+              name: "router.tailnet.ts.net",
+              hostname: "router",
+              tags: ["tag:docker"],
+              advertisedRoutes: ["10.128.64.0/24"],
+              enabledRoutes: [],
+            },
+          ];
+        }
+        return [
+          {
+            id: "dev-1",
+            name: "router.tailnet.ts.net",
+            hostname: "router",
+            tags: ["tag:docker"],
+            advertisedRoutes: ["10.128.64.0/24"],
+            enabledRoutes: ["10.128.64.0/24"],
+          },
+        ];
+      },
+    } as any;
+
+    const res = await pollRouterDeviceAndRoutes({
+      apiClient: fakeClient,
+      tsHostname: "router",
+      routerTag: "tag:docker",
+      routesToCheck: ["10.128.64.0/24"],
+      timeoutMs: 500,
+      intervalMs: 10,
+    });
+
+    expect(res.deviceFound).toBe(true);
+    expect(res.tagMatched).toBe(true);
+    expect(res.routeResults.every((r) => r.passed)).toBe(true);
+    expect(callCount).toBe(2);
   });
 
   test("policy write does not occur when policy validation fails", async () => {

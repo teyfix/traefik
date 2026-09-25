@@ -1,16 +1,5 @@
 {{- $tailDomain := getenv "TAIL_DOMAIN" -}}
 {{- $tailDomainEsc := $tailDomain | regexp.QuoteMeta -}}
-{{- $directDomain := getenv "DIRECT_DOMAIN" -}}
-
-{{ $directDomain }} {
-  log
-  errors
-
-  # Exact network aliases in this zone are resolved by Docker's embedded DNS.
-  # There is intentionally no wildcard fallback to Traefik in this subzone.
-  forward . 127.0.0.11
-  cache 30
-}
 
 {{ $tailDomain }} {
   log

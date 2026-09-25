@@ -220,27 +220,29 @@ export class TailscaleApiClient {
   }
 
   /**
-   * Creates a reusable, preauthorized, tagged auth key for the ts-router.
-   * As required by acceptance criteria:
-   * - reusable: true (for router recovery if state is lost)
-   * - ephemeral: false
+   * Creates a short-lived, single-use, preauthorized, tagged auth key for the ts-router.
+   * As required by operator direction:
+   * - reusable: false (single-use)
+   * - ephemeral: false (non-ephemeral router with persisted Tailscale state)
    * - preauthorized: true
    * - tags: [tag]
+   * - expirySeconds: 3600 (short-lived)
    */
-  async createAuthKey(options: { tag: string; description?: string }): Promise<string> {
+  async createAuthKey(options: { tag: string; description?: string; expirySeconds?: number }): Promise<string> {
     const tag = options.tag.startsWith("tag:") ? options.tag : `tag:${options.tag}`;
     const payload = {
       capabilities: {
         devices: {
           create: {
-            reusable: true,
+            reusable: false,
             ephemeral: false,
             preauthorized: true,
             tags: [tag],
           },
         },
       },
-      description: options.description || "Traefik Docker subnet router recovery key",
+      expirySeconds: options.expirySeconds ?? 3600,
+      description: options.description || "Traefik Docker ingress router single-use auth key",
     };
 
     const res = await this.request<{ key: string }>("/tailnet/-/keys", {

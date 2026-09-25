@@ -75,20 +75,20 @@ Make sure you're inside the cloned folder before running any of the next steps.
 
 ### 2. Run the Onboarding CLI
 
-Run the idempotent onboarding CLI to automatically inspect your host and tailnet, discover non-conflicting Docker address pools, configure Tailscale policy, register split DNS, provision the router auth key, and verify Step CA certificates:
+Run the idempotent onboarding CLI to automatically inspect your host and tailnet, discover a unique non-conflicting 10.* /24 Docker ingress subnet, configure Tailscale policy, register split DNS, provision the router auth key, and verify Step CA certificates:
 
 ```bash
 # Interactive mode
 TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts
 
 # Non-interactive automatic mode
-TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --docker-pool auto --ts-dns-zone auto --yes
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --ingress-subnet auto --ts-dns-zone auto --yes
 
 # Dry run (plan mutations without applying changes)
 TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --dry-run
 ```
 
-`TS_API_TOKEN` is transient and never written to disk. The onboarding process automatically generates a reusable tagged router auth key (`TS_AUTHKEY`) and persists it to `.env` for hands-off router recovery.
+`TS_API_TOKEN` is transient and never written to disk. The onboarding process provisions a short-lived, single-use tagged router auth key (`TS_AUTHKEY`) injected transiently for initial container registration. The router preserves its state in the persistent `traefik_tailscale` Docker volume without persisting credentials to `.env`.
 
 ### 3. Manual Configuration (Alternative)
 

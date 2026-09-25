@@ -8,11 +8,18 @@ export interface ServiceStatus {
 export async function startTraefikStack(
   repoRoot: string,
   dryRun = false,
+  extraEnv?: Record<string, string>,
 ): Promise<void> {
   if (dryRun) return;
 
+  const env = {
+    ...process.env,
+    ...(extraEnv || {}),
+  };
+
   const proc = Bun.spawn(["docker", "compose", "up", "-d", "--remove-orphans"], {
     cwd: repoRoot,
+    env,
     stdout: "inherit",
     stderr: "inherit",
   });

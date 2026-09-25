@@ -33,8 +33,9 @@ export function updateEnvContent(
   updates: Record<string, string>,
 ): string {
   const remaining = new Map(Object.entries(updates));
-  // Strictly prevent TS_API_TOKEN from ever being stored
+  // Strictly prevent TS_API_TOKEN and TS_AUTHKEY from ever being stored
   remaining.delete("TS_API_TOKEN");
+  remaining.delete("TS_AUTHKEY");
 
   const lines = originalContent ? originalContent.split(/\r?\n/) : [];
   const updatedLines: string[] = [];
@@ -45,6 +46,9 @@ export function updateEnvContent(
     const key = match?.[1];
     if (!key) {
       updatedLines.push(line);
+      continue;
+    }
+    if (key === "TS_API_TOKEN" || key === "TS_AUTHKEY") {
       continue;
     }
     if (remaining.has(key)) {

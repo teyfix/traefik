@@ -6,27 +6,22 @@ are examples; they are not an allocation for a new router.
 
 This Compose component makes development services reachable from authorized
 tailnet devices under the configured private DNS suffix. It owns the persistent
-Tailscale subnet-router identity, CoreDNS, and the shared
-`tailscale_services` Docker network. Application projects continue to own their
-containers and routes.
+Tailscale subnet-router identity, CoreDNS, and the routed
+`traefik_ingress` Docker network. Application projects continue to own their
+containers and routes on the private, unadvertised `traefik_proxy` network.
 
 ## Request and DNS flow
 
 Every tailnet client sends queries for the configured private suffix to
-CoreDNS at `TS_DNS_SERVER`. CoreDNS then selects one of two exposure paths:
+CoreDNS at `TS_DNS_SERVER`. CoreDNS synthesizes an A record containing Traefik's
+static ingress IP (`TRAEFIK_IP`):
 
 ```text
 ordinary name, for example api.project.dev.example.test
-  -> CoreDNS returns Traefik's Docker-network address
-  -> tailnet subnet router
-  -> Traefik TLS/router/middleware
-  -> project service on traefik_proxy
-
-direct name, for example hello.project.dkr.dev.example.test
-  -> CoreDNS asks Docker's embedded DNS for the exact network alias
-  -> CoreDNS returns that container's service-subnet address
-  -> tailnet subnet router
-  -> container's native port and protocol
+  -> CoreDNS returns Traefik's static ingress IP (TRAEFIK_IP on traefik_ingress)
+  -> tailnet subnet router forwards traffic across the advertised ingress /24
+  -> Traefik TLS termination / router / middleware
+  -> project service on private, unadvertised traefik_proxy
 ```
 
 ## How hostname discovery works
@@ -38,24 +33,24 @@ service-discovery layers are independent and meet at the requested hostname:
    restricted nameserver at `TS_DNS_SERVER`. It does not contain records for
    application services.
 2. A tailnet client's local Tailscale resolver sends every private-suffix query
-   to that CoreDNS address through the advertised service subnet route.
+   to that CoreDNS address through the advertised ingress subnet route.
 3. For an ordinary name, CoreDNS synthesizes an A record containing Traefik's
-   Docker IP. The wildcard covers the apex and every subdomain, so adding
+   static ingress IP (`TRAEFIK_IP`). The wildcard covers the apex and every subdomain, so adding
    `api.project.dev.example.test` does not require a CoreDNS edit or a record in the
    Tailscale admin console.
 4. Independently, Traefik watches the Docker socket. When a running container
    on `traefik_proxy` has enabled labels, Traefik creates the declared router
    and maps its `Host(...)` or `HostSNI(...)` rule to that container and port.
 5. The client connects to the synthesized IP through the advertised
-   Docker/Traefik route. Traefik selects the router by the original HTTP Host
+   ingress route. Traefik selects the router by the original HTTP Host
    header or TLS SNI name and requests a matching certificate from Step CA.
 
 CoreDNS therefore does not discover containers, inspect Traefik labels, or
-store a list of ordinary services. It deliberately answers all ordinary names
-with the same Traefik IP. A name can resolve successfully even when no matching
-router exists; in that case Traefik returns its unmatched route response and
-may present its default certificate. Trusting the Step CA root cannot validate
-that unrelated default leaf for the requested hostname. DNS resolution proves
+store a list of ordinary services. It deliberately answers all names under the
+split-DNS zone with Traefik's static IP on `traefik_ingress`. A name can resolve
+successfully even when no matching router exists; in that case Traefik returns its
+unmatched route response and may present its default certificate. Trusting the Step CA root
+cannot validate that unrelated default leaf for the requested hostname. DNS resolution proves
 only that the shared ingress is discoverable, not that an application exists.
 
 Adding a normal HTTPS service requires only:
@@ -67,57 +62,35 @@ Adding a normal HTTPS service requires only:
 
 Starting, stopping, or renaming an ordinary application container needs no DNS
 restart because the wildcard answer is unchanged. Traefik notices the Docker
-event and adds or removes the router dynamically. Direct names under
-`DIRECT_DOMAIN` are different: they exist only when a container explicitly owns
-the complete name as a `tailscale_services` network alias, and Docker's
-embedded DNS supplies that exact record dynamically.
+event and adds or removes the router dynamically.
 
-Ordinary synthesized A answers have a 60-second TTL. Direct answers pass
-through CoreDNS's 30-second cache. Clients may therefore retain a recently
+Ordinary synthesized A answers have a 60-second TTL. Clients may retain a recently
 changed answer until its TTL expires even after the container or router changes.
 
-At CoreDNS startup, its entrypoint resolves the `traefik.docker.local` network
-alias and renders that IP into the wildcard response. The rendered answer is
-fixed for that CoreDNS process. If Traefik is recreated and receives a different
-Docker IP, restart or recreate CoreDNS afterward. If certificate issuance was
-attempted while the old IP was still served, restart Traefik in place after
-CoreDNS is healthy so ACME retries the challenge. `docker compose up -d` starts
-the complete stack and respects the declared dependency order.
+At CoreDNS startup, its entrypoint receives the static `TRAEFIK_IP` (or resolves the
+`traefik` network alias on `traefik_ingress`) and renders that IP into the wildcard response.
+`docker compose up -d` starts the complete stack and respects the declared dependency order.
 
-Tailscale routes packets to IP ranges; it does not route hostnames. CoreDNS is
-what decides whether a name maps to the Traefik address class or directly to a
-container address. The connector must therefore advertise both ranges:
+Tailscale routes packets to IP ranges; it does not route hostnames. The connector
+advertises solely the dedicated ingress /24 subnet:
 
 ```env
 TAIL_DOMAIN=dev.example.test
-DIRECT_DOMAIN=dkr.dev.example.test
-TS_SERVICE_SUBNET=10.10.10.0/24
-TS_ROUTES=10.10.10.0/24,172.16.0.0/12
+TS_INGRESS_SUBNET=10.10.10.0/24
+TS_ROUTES=10.10.10.0/24
+TRAEFIK_IP=10.10.10.2
 TS_DNS_SERVER=10.10.10.10
 TS_HOSTNAME=docker-subnet-router
 TS_FORWARD_MSS=1160
 ```
 
-- `TS_SERVICE_SUBNET` contains CoreDNS and containers explicitly attached for
-  direct access.
-- The additional route covers Docker/Traefik addresses used by normal routed
-  names.
+- `TS_INGRESS_SUBNET` contains only Tailscale, CoreDNS, and Traefik.
+- Application backend containers remain isolated on `traefik_proxy`, which is never advertised to Tailscale.
 
 Traefik's host-published ports bind only to `127.0.0.1`, so they are available
 to host-local clients but not through ordinary host LAN interfaces. Tailnet
-clients use the advertised Docker/Traefik route to reach Traefik's Docker
+clients use the advertised ingress route to reach Traefik's static IP
 address directly; they do not depend on those host port publications.
-
-`TS_SERVICE_SUBNET` configures the dedicated `tailscale_services` bridge. It is
-not Docker's general address range and does not replace the Docker/Traefik
-route. CoreDNS gives the more-specific `DIRECT_DOMAIN` zone precedence over the
-ordinary `TAIL_DOMAIN` wildcard.
-
-> [!WARNING]
-> Broad Docker routes can overlap a tailnet client's LAN, VPN, or local Docker
-> networks. An overlapping client may select the wrong route. If that happens,
-> coordinate a narrower, non-overlapping Docker address pool before changing
-> the advertised route.
 
 ## WSL NAT and forwarded TCP MSS
 
@@ -177,31 +150,31 @@ Traefik labels and any workload-specific sidecars.
 Configure policy in the
 [Tailscale policy editor](https://login.tailscale.com/admin/acls) before
 starting the connector. The following policy fragment shows the intended
-relationship for the example CIDRs in `.example.env`; replace them with the
-actual approved routes and merge the fragment into the tailnet's existing
+relationship for the example ingress CIDR in `.example.env`; replace it with the
+actual approved ingress /24 route and merge the fragment into the tailnet's existing
 policy instead of replacing it. Substitute the actual group allowed to own the
 connector if `autogroup:admin` is too broad.
 
 ```json
 {
-  "autoApprovers": { "routes": { "10.10.10.0/24": ["tag:docker"], "172.16.0.0/12": ["tag:docker"] } },
+  "autoApprovers": { "routes": { "10.10.10.0/24": ["tag:docker"] } },
   "tagOwners": { "tag:docker": ["autogroup:admin"] }
 }
 ```
 
-Route approval only allows the tagged connector to publish those routes. It
-does **not** give users permission to reach them. Add a separate grant for the
+Route approval only allows the tagged connector to publish that route. It
+does **not** give users permission to reach it. Add a separate grant for the
 specific users/groups and destination ports your development policy permits.
-For example, this broad development grant permits members to reach both routed
-ranges on any IP protocol:
+For example, this development grant permits members to reach the routed
+ingress range on any IP protocol:
 
 ```json
-{ "grants": [{ "dst": ["10.10.10.0/24", "172.16.0.0/12"], "ip": ["*"], "src": ["autogroup:member"] }] }
+{ "grants": [{ "dst": ["10.10.10.0/24"], "ip": ["*"], "src": ["autogroup:member"] }] }
 ```
 
 Prefer narrower groups and ports where practical. A narrowed policy must still
-permit TCP and UDP port 53 to the configured `TS_DNS_SERVER`, plus each
-intended Traefik or direct-service destination port.
+permit TCP and UDP port 53 to the configured `TS_DNS_SERVER`, plus the
+Traefik destination ports (e.g. 80, 443).
 
 Private split DNS is not an access-control boundary. Knowing or resolving a
 private name does not authorize a client; Tailscale grants must restrict the
@@ -225,18 +198,17 @@ this private development suffix.
 
 Finally, create a Tailscale auth key from the
 [keys administration page](https://login.tailscale.com/admin/settings/keys)
-with these properties:
+(or have the onboarding CLI provision it) with these properties:
 
 - tagged with `tag:docker`
 - non-ephemeral, because this connector has a persistent identity
-- reusable disabled (a one-off key)
+- reusable disabled (a short-lived single-use key)
 
-Store it as `TS_AUTHKEY` in the gitignored root `.env` copied from
-`.example.env`. The legacy `env/.env.tailscale.local` file is still read for
-existing installations; keep only one current key source to avoid confusion.
-Do not commit the key. The connector's Docker volume preserves its identity, so
-the key is normally needed only for initial registration or after deliberately
-deleting that state.
+Never commit auth keys or API tokens. In the onboarding CLI flow, `TS_AUTHKEY` is
+injected transiently into the initial container startup environment and is
+never written to `.env`. The connector's Docker volume (`traefik_tailscale`) preserves
+its state in `/var/lib/tailscale/tailscaled.state`, so the key is needed only for initial
+registration or after deliberately deleting that state.
 
 ## Start and verify
 
@@ -257,11 +229,9 @@ stack while preserving its volumes.
 
 Verify from a different tailnet device, not only from the Docker host:
 
-1. The service hostname resolves to the intended Traefik address.
+1. The service hostname resolves to Traefik's static ingress address (`TRAEFIK_IP`).
 2. HTTPS reaches the matching project router after the Step CA root is trusted.
-3. A direct recipe name resolves to a service-subnet container address and is
-   reachable on the container's native port.
-4. The connector advertises both configured routes and the routes are enabled.
+3. The connector advertises only the configured ingress /24 route and the route is enabled.
 
 Host-side DNS can behave differently when another VPN or the host's own
 Tailscale daemon manages routes. A real remote tailnet client is the decisive
@@ -290,47 +260,13 @@ services:
       - traefik.http.services.project_api.loadbalancer.server.port=8080
 ```
 
-The project service does not join `tailscale_services` for this path. Traefik
-is the only component that needs Docker-network reachability to it.
+The project service does not join `traefik_ingress` or publish host ports. Traefik
+is the only component that bridges traffic from `traefik_ingress` to backend services
+on `traefik_proxy`.
 
-## Opt-in direct-container exposure
-
-Direct exposure is an escape hatch for protocols or tests that should not pass
-through Traefik. The container must explicitly join the external
-`tailscale_services` network with its complete DNS name as an exact alias:
-
-```yaml
-networks:
-  tailscale_services:
-    name: tailscale_services
-    external: true
-
-services:
-  hello:
-    networks:
-      tailscale_services:
-        aliases:
-          - hello.project.dkr.dev.example.test
-```
-
-Use the convention `<service>.<project>.<DIRECT_DOMAIN>`. A `hostname:` value is
-optional; the network alias is the discovery contract used by Docker's embedded
-DNS. Do not attach a container merely because it already has a Traefik route.
-
-> [!NOTE]
-> Direct names must match a network alias exactly. An unknown direct name
-> never falls back to Traefik; Docker embedded DNS may return no answer or,
-> in some WSL environments, let the lookup time out instead of returning
-> `NXDOMAIN`.
-
-Direct exposure bypasses Traefik TLS termination, middleware, authentication,
-and routing. Clients connect to the service's native port and protocol, and the
-tailnet policy must grant that destination/port. Do not publish a host port just
-for Tailscale access.
-
-The disposable [direct-container recipe](../../recipes/tailscale-direct/README.md)
-demonstrates the complete opt-in contract and is intentionally not included by
-the central Compose model.
+Under this ingress-only architecture, direct container exposure via advertised Docker
+subnets and direct DNS queries are eliminated. All ingress traffic traverses Traefik,
+providing centralized TLS termination, routing, and access control.
 
 ## OAuth and certificate trust
 

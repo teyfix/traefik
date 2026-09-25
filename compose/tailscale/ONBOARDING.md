@@ -32,30 +32,21 @@ existing Tailnet for every contributor.
 |Networks|Exact allocated CIDRs and reserved DNS/router/ingress IPs, with enough existing route information to check overlaps.|
 |Access|Assigned tag/auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat.|
 
-The configuration must distinguish the following designs:
+The ingress configuration uses the following ingress-only architecture:
 
 |Design|What the onboarding agent can assume|
-|-|-|
-|Current repository|`tailscale_services` has explicit `TS_SERVICE_SUBNET`; `traefik_proxy` is auto-allocated separately. CoreDNS returns the proxy-network Traefik address for ordinary names.|
-|Proposed single-subnet ingress|DNS and a private ingress proxy share one allocated host subnet, which is the advertised route. This is a design proposal, not implemented here by changing environment values.|
+|---|---|
+|Ingress-only design|`traefik_ingress` has an explicit `10.* /24` `TS_INGRESS_SUBNET` containing Tailscale, CoreDNS (`TS_DNS_SERVER`), and Traefik (`TRAEFIK_IP`). Only this ingress `/24` is advertised to Tailscale. Backend applications live on the isolated, unadvertised `traefik_proxy` network.|
 
-The intended predictable allocation is one exposed subnet per host where that
-design is implemented. An example such as `10.20.20.0/24` with DNS at
-`10.20.20.20` is not a reservation. This repository does not currently expose
-`TS_PROXY_SERVER` or `TS_ROUTER_IP` configuration inputs. If the selected setup
-needs that design, report the infrastructure gap and obtain its own scoped
-implementation; do not invent unsupported environment variables or change
-CoreDNS templates during onboarding. Application work using existing shared
-services can proceed independently.
+The allocation is one unique explicit `10.*` Docker ingress `/24` per host,
+discovered by scanning claimed routes across all tailnet devices (both online and offline)
+and local host routes. An existing ingress subnet is preserved only when ownership
+is unambiguous.
 
-For the current design, inspect the actual proxy network and required routes.
-Do not copy its broad `172.16.0.0/12` advertisement to another host. Docker
-allocates default networks locally, so identical default `bridge` subnets on
-different hosts do not alone prove a conflict. Compare the subnets actually
-advertised and the effective routes on clients. Explicit Compose IPAM controls
-a selected network; daemon `default-address-pools` controls future automatic
-networks, and `bip` controls the default bridge. None is an instruction to
-renumber or recreate existing networks during onboarding.
+Application workloads attach exclusively to `traefik_proxy` and declare their
+`traefik.http.routers.*` labels. Direct-container DNS (`DIRECT_DOMAIN`) and routing
+into private Docker backend subnets are eliminated, avoiding global Docker daemon
+address pool mutations and subnet conflicts across tailnet peers.
 
 If the current policy auto-approves routes within `0.0.0.0/0` and `::/0` for
 `tag:docker`, a device authenticated with that tag can have its advertised

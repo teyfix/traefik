@@ -80,33 +80,29 @@ export async function ensureRouterAuthKey(params: {
   hasLocalState?: boolean;
   forceRotate?: boolean;
   dryRun?: boolean;
-}): Promise<{ authKey: string; generated: boolean }> {
-  const { client, existingKey, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
+}): Promise<{ authKey: string; generated: boolean; needed: boolean }> {
+  const { client, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
 
-  const isWellFormed =
-    existingKey &&
-    existingKey.startsWith("tskey-auth-") &&
-    !existingKey.includes("placeholder") &&
-    !existingKey.includes("REPLACE_WITH");
-
-  // Reusable auth keys expire after at most 90 days.
-  // Remote device registration does not prove a stored key remains valid for state-loss recovery.
-  // Only reuse the existing key if local state is already present and intact on this host.
-  // When local state is missing (fresh bootstrap or volume wipe recovery) or when forced, generate a fresh key.
-  if (isWellFormed && !forceRotate && hasLocalState) {
-    return { authKey: existingKey, generated: false };
+  // Single-use auth key contract:
+  // If local state is already present in the volume (hasLocalState: true) and not forceRotate,
+  // the non-ephemeral router will authenticate using its persisted state (/var/lib/tailscale/tailscaled.state).
+  // No auth key is needed or generated.
+  if (hasLocalState && !forceRotate) {
+    return { authKey: "", generated: false, needed: false };
   }
 
+  // If local state is missing (fresh bootstrap or volume wipe) or forceRotate requested:
+  // Generate a short-lived, single-use auth key.
   if (dryRun) {
-    return { authKey: "mock-authkey-dryrun-reusable", generated: true };
+    return { authKey: "mock-authkey-dryrun-single-use", generated: true, needed: true };
   }
 
   const generatedKey = await client.createAuthKey({
     tag: routerTag,
-    description: `Router key for ${hostname} (reusable for recovery)`,
+    description: `Single-use router key for ${hostname}`,
   });
 
-  return { authKey: generatedKey, generated: true };
+  return { authKey: generatedKey, generated: true, needed: true };
 }
 
 export async function reconcileSplitDns(params: {

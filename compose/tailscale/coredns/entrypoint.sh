@@ -17,11 +17,12 @@ lookup_ipv4() {
 
 main() {
   : "${TAIL_DOMAIN:?TAIL_DOMAIN is required}"
-  : "${DIRECT_DOMAIN:?DIRECT_DOMAIN is required}"
-  : "${TRAEFIK_DNS_NAME:?TRAEFIK_DNS_NAME is required}"
 
+  if [ -z "${TRAEFIK_IP:-}" ]; then
+    : "${TRAEFIK_DNS_NAME:?TRAEFIK_IP or TRAEFIK_DNS_NAME is required}"
+    TRAEFIK_IP="$(lookup_ipv4 "$TRAEFIK_DNS_NAME")"
+  fi
   export TRAEFIK_IP
-  TRAEFIK_IP="$(lookup_ipv4 "$TRAEFIK_DNS_NAME")"
 
   gomplate -f /usr/src/app/Corefile.gotpl -o /usr/src/app/Corefile
   exec coredns -conf /usr/src/app/Corefile

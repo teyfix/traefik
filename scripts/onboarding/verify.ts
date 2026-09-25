@@ -34,6 +34,72 @@ export function verifyDeviceRoutes(
   return results;
 }
 
+/**
+ * Polls Tailscale API for router device presence and approved subnet routes with bounded timeout.
+ */
+export async function pollRouterDeviceAndRoutes(params: {
+  apiClient: TailscaleApiClient;
+  tsHostname: string;
+  routerTag: string;
+  routesToCheck: string[];
+  timeoutMs?: number;
+  intervalMs?: number;
+}): Promise<{
+  deviceFound: boolean;
+  routerDev?: any;
+  tagMatched: boolean;
+  routeResults: VerificationResult[];
+}> {
+  const {
+    apiClient,
+    tsHostname,
+    routerTag,
+    routesToCheck,
+    timeoutMs = 30000,
+    intervalMs = 2000,
+  } = params;
+
+  const tag = routerTag.startsWith("tag:") ? routerTag : `tag:${routerTag}`;
+  const startTime = Date.now();
+
+  let lastDevice: any;
+  let lastRouteResults: VerificationResult[] = [];
+  let tagMatched = false;
+
+  while (Date.now() - startTime <= timeoutMs) {
+    try {
+      const devices = await apiClient.getDevices();
+      const dev = findRouterDevice(devices, tsHostname);
+      if (dev) {
+        lastDevice = dev;
+        tagMatched = (dev.tags || []).includes(tag);
+        lastRouteResults = verifyDeviceRoutes(dev, routesToCheck);
+
+        const allApproved =
+          lastRouteResults.length > 0 && lastRouteResults.every((r) => r.passed);
+        if (tagMatched && allApproved) {
+          return {
+            deviceFound: true,
+            routerDev: dev,
+            tagMatched: true,
+            routeResults: lastRouteResults,
+          };
+        }
+      }
+    } catch {}
+
+    if (Date.now() - startTime + intervalMs > timeoutMs) break;
+    await Bun.sleep(intervalMs);
+  }
+
+  return {
+    deviceFound: Boolean(lastDevice),
+    routerDev: lastDevice,
+    tagMatched,
+    routeResults: lastRouteResults,
+  };
+}
+
 export async function runVerification(params: {
   repoRoot: string;
   dnsZone: string;
@@ -44,6 +110,7 @@ export async function runVerification(params: {
   routes?: string[] | string;
   traefikDomain?: string;
   apiClient?: TailscaleApiClient;
+  pollTimeoutMs?: number;
 }): Promise<VerificationResult[]> {
   const {
     repoRoot,
@@ -55,6 +122,7 @@ export async function runVerification(params: {
     routes,
     traefikDomain,
     apiClient,
+    pollTimeoutMs,
   } = params;
 
   const results: VerificationResult[] = [];
@@ -70,11 +138,11 @@ export async function runVerification(params: {
   // 2. Required Docker networks exist
   const networks = await inspectDockerNetworks();
   const hasProxy = networks.some((n) => n.name === "traefik_proxy");
-  const hasTailscale = networks.some((n) => n.name === "tailscale_services");
+  const hasIngress = networks.some((n) => n.name === "traefik_ingress" || n.name === "tailscale_services");
   results.push({
     step: "Docker networks exist",
-    passed: hasProxy && hasTailscale,
-    message: `traefik_proxy: ${hasProxy ? "present" : "missing"}, tailscale_services: ${hasTailscale ? "present" : "missing"}`,
+    passed: hasProxy && hasIngress,
+    message: `traefik_proxy: ${hasProxy ? "present" : "missing"}, ingress network: ${hasIngress ? "present" : "missing"}`,
   });
 
   // 3. Traefik stack containers running
@@ -99,31 +167,34 @@ export async function runVerification(params: {
   // 4. Tailnet status (if API client provided)
   if (apiClient) {
     try {
-      const devices = await apiClient.getDevices();
-      const tag = routerTag.startsWith("tag:") ? routerTag : `tag:${routerTag}`;
-      const routerDev = findRouterDevice(devices, tsHostname);
+      const routesToCheck = Array.isArray(routes)
+        ? routes
+        : (routes || routedSubnet || "").split(",").map((s) => s.trim()).filter(Boolean);
 
-      if (routerDev) {
-        const hasTag = (routerDev.tags || []).includes(tag);
-        results.push({
-          step: "Tailscale router registered & tagged",
-          passed: hasTag,
-          message: hasTag
-            ? `Device '${routerDev.name}' has tag ${tag}`
-            : `Tag ${tag} missing on router device '${routerDev.name}'`,
-        });
+      const pollRes = await pollRouterDeviceAndRoutes({
+        apiClient,
+        tsHostname,
+        routerTag,
+        routesToCheck,
+        timeoutMs: pollTimeoutMs ?? 30000,
+      });
 
-        const routesToCheck = Array.isArray(routes)
-          ? routes
-          : (routes || routedSubnet || "").split(",").map((s) => s.trim()).filter(Boolean);
-
-        results.push(...verifyDeviceRoutes(routerDev, routesToCheck));
-      } else {
+      if (!pollRes.deviceFound) {
         results.push({
           step: "Tailscale router device connected",
           passed: false,
-          message: `Router device with hostname '${tsHostname}' not found on tailnet`,
+          message: `Router device with hostname '${tsHostname}' not found on tailnet after polling`,
         });
+      } else {
+        results.push({
+          step: "Tailscale router registered & tagged",
+          passed: pollRes.tagMatched,
+          message: pollRes.tagMatched
+            ? `Device '${pollRes.routerDev?.name}' has tag ${routerTag}`
+            : `Tag ${routerTag} missing on router device '${pollRes.routerDev?.name}'`,
+        });
+
+        results.push(...pollRes.routeResults);
       }
 
       // Split DNS rule check

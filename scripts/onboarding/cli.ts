@@ -5,7 +5,7 @@ import {
   getHelpText,
   type RawCliOptions,
   resolveOptionValue,
-  DockerPoolSchema,
+  IngressSubnetSchema,
   DnsZoneSchema,
 } from "./options";
 import { getHostShortName, deriveDnsZoneFromHost, getLocalRoutes, ensureIpForwarding } from "./host";
@@ -14,11 +14,14 @@ import {
   isDockerDaemonReachable,
   installDockerIfMissing,
   inspectDockerNetworks,
-  configureDaemonAddressPool,
   ensureDockerNetwork,
   hasLocalTailscaleState,
 } from "./docker";
-import { allocateDockerPool, deriveDnsResolverIp, cidrsOverlap, isIpInCidr, parseCidr } from "./network";
+import {
+  allocateIngressSubnet,
+  checkIngressSubnetOwnership,
+  cidrsOverlap,
+} from "./network";
 import { TailscaleApiClient } from "./tailscale-api";
 import {
   inspectTailnet,
@@ -132,23 +135,18 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const defaultTsHostname = `${hostShort}-router`;
   const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
 
-  // Identify subnets owned by tailscale_services so reruns do not treat them as external conflicts
+  // Identify subnets owned by this router so reruns do not treat them as external conflicts
   const ownSubnets: string[] = [];
   for (const net of dockerNetworks) {
-    if (net.name === "tailscale_services") {
+    if (net.name === "traefik_ingress" || net.name === "tailscale_services") {
       ownSubnets.push(...net.subnets);
     }
   }
-  if (existingEnv.TS_SERVICE_SUBNET) {
-    ownSubnets.push(existingEnv.TS_SERVICE_SUBNET);
+  if (existingEnv.TS_INGRESS_SUBNET) {
+    ownSubnets.push(existingEnv.TS_INGRESS_SUBNET);
   }
-  if (existingEnv.TS_ROUTES) {
-    for (const r of existingEnv.TS_ROUTES.split(",")) {
-      const trimmed = r.trim();
-      if (trimmed && !ownSubnets.includes(trimmed)) {
-        ownSubnets.push(trimmed);
-      }
-    }
+  if (existingEnv.TS_SERVICE_SUBNET && !ownSubnets.includes(existingEnv.TS_SERVICE_SUBNET)) {
+    ownSubnets.push(existingEnv.TS_SERVICE_SUBNET);
   }
 
   // Include advertised routes of any existing router device on tailnet matching this exact hostname
@@ -161,34 +159,66 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
 
   const localDockerSubnets = dockerNetworks.flatMap((n) => n.subnets);
 
-  const existingSubnets = [
+  // Claimed routes from ALL Tailnet devices (including offline devices)
+  const claimedTailnetRoutes = new Set<string>();
+  for (const dev of tailnet.devices) {
+    for (const r of dev.advertisedRoutes || []) claimedTailnetRoutes.add(r);
+    for (const r of dev.enabledRoutes || []) claimedTailnetRoutes.add(r);
+  }
+  for (const r of tailnet.routes) {
+    claimedTailnetRoutes.add(r);
+  }
+
+  const allClaimedRoutes = [
+    ...claimedTailnetRoutes,
     ...localRoutes,
     ...localDockerSubnets,
-    ...tailnet.routes,
   ];
 
+  // Check unambiguous ownership of existing ingress subnet:
+  // "preserve an existing ingress subnet only when ownership is unambiguous."
+  const candidateExistingSubnet =
+    existingEnv.TS_INGRESS_SUBNET ||
+    existingEnv.TS_SERVICE_SUBNET ||
+    dockerNetworks.find((n) => n.name === "traefik_ingress" || n.name === "tailscale_services")?.subnets[0];
+
+  let unambiguousSubnet: string | undefined;
+  if (candidateExistingSubnet) {
+    const ownership = checkIngressSubnetOwnership({
+      candidateSubnet: candidateExistingSubnet,
+      tailnetDevices: tailnet.devices,
+      routerHostname: resolvedTsHostname,
+      localRoutes,
+      ownDockerSubnets: localDockerSubnets,
+    });
+    if (ownership.unambiguous) {
+      unambiguousSubnet = candidateExistingSubnet;
+    }
+  }
+
   // Phase 5: Option resolution
-  // 5.1 Docker pool
-  const recommendedPool = allocateDockerPool(
-    existingSubnets,
-    existingEnv.DOCKER_POOL,
-    ownSubnets,
-    localDockerSubnets,
-  );
-  const resolvedPoolInput = await resolveOptionValue({
-    cliValue: cliOptions.dockerPool,
-    defaultValue: recommendedPool.hostPool,
+  // 5.1 Ingress Subnet allocation
+  const recommendedAllocation = allocateIngressSubnet({
+    claimedRoutes: allClaimedRoutes,
+    unambiguousSubnet,
+    existingDnsIp: existingEnv.TS_DNS_SERVER,
+    existingTraefikIp: existingEnv.TRAEFIK_IP,
+  });
+
+  const resolvedSubnetInput = await resolveOptionValue({
+    cliValue: cliOptions.ingressSubnet || cliOptions.dockerPool,
+    defaultValue: recommendedAllocation.ingressSubnet,
     isYes: cliOptions.yes,
     promptFn: async (rec) => {
       const val = await p.text({
-        message: "Docker address pool (/18):",
+        message: "Docker ingress subnet (/24 in 10.*):",
         initialValue: rec,
         validate: (input) => {
-          const parsed = DockerPoolSchema.safeParse(input);
+          const parsed = IngressSubnetSchema.safeParse(input);
           if (!parsed.success) {
             return (
               parsed.error.issues[0]?.message ||
-              "Please provide a valid /18 CIDR (e.g. 10.128.64.0/18) or 'auto'"
+              "Please provide a valid 10.* /24 CIDR (e.g. 10.128.64.0/24) or 'auto'"
             );
           }
         },
@@ -201,78 +231,46 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     },
   });
 
-  const finalPool =
-    resolvedPoolInput === "auto"
-      ? recommendedPool
-      : allocateDockerPool(existingSubnets, resolvedPoolInput, ownSubnets, localDockerSubnets);
+  const finalAllocation =
+    resolvedSubnetInput === "auto"
+      ? recommendedAllocation
+      : allocateIngressSubnet({
+          claimedRoutes: allClaimedRoutes,
+          preferredSubnet: resolvedSubnetInput,
+          unambiguousSubnet,
+          existingDnsIp: existingEnv.TS_DNS_SERVER,
+          existingTraefikIp: existingEnv.TRAEFIK_IP,
+        });
 
-  // Resolve the service subnet first. Existing service state is the authoritative routed subnet
-  // on reruns, so proxy migration decisions must be made against this effective value rather
-  // than the allocator's tentative routedSubnet.
-  const servicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
-  const existingServicesSubnet = servicesNet?.subnets[0] || existingEnv.TS_SERVICE_SUBNET;
-  let routedSubnet = finalPool.routedSubnet;
-  let needsServicesRecreate = false;
+  const routedSubnet = finalAllocation.ingressSubnet;
+  const dnsResolverIp = finalAllocation.dnsResolverIp;
+  const traefikIp = finalAllocation.traefikIp;
 
-  if (existingServicesSubnet) {
-    let isCompatible = false;
-    try {
-      const parsedServicesSubnet = parseCidr(existingServicesSubnet);
-      isCompatible =
-        isIpInCidr(parsedServicesSubnet.ip, finalPool.hostPool) &&
-        parsedServicesSubnet.prefix === 24;
-    } catch {
-      isCompatible = false;
+  // Check existing ingress networks on host
+  const ingressNet = dockerNetworks.find((n) => n.name === "traefik_ingress" || n.name === "tailscale_services");
+  let needsIngressRecreate = false;
+  if (ingressNet && ingressNet.subnets[0] && ingressNet.subnets[0] !== routedSubnet) {
+    const hasContainers = Boolean(ingressNet.containers && ingressNet.containers.length > 0);
+    if (hasContainers) {
+      throw new Error(
+        `Existing Docker network '${ingressNet.name}' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. Stop running services ('docker compose down') before migrating to the new subnet.`,
+      );
     }
-
-    if (isCompatible) {
-      routedSubnet = existingServicesSubnet;
-    } else if (servicesNet) {
-      const hasContainers = Boolean(servicesNet.containers && servicesNet.containers.length > 0);
-      if (hasContainers) {
-        throw new Error(
-          `Existing Docker network 'tailscale_services' (${servicesNet.subnets[0]}) is on an incompatible subnet and has active containers. Stop running services ('docker compose down') before migrating to the new pool.`,
-        );
-      }
-      needsServicesRecreate = true;
-    }
+    needsIngressRecreate = true;
   }
 
-  // Resolve the proxy subnet after the effective service subnet is known.
-  // - Preserve a non-overlapping existing proxy subnet.
-  // - Recreate an empty colliding proxy network.
-  // - Reject migration when a colliding proxy still has attached containers.
+  // Check traefik_proxy network collision with routed ingress subnet
   const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
-  const existingProxySubnet = proxyNet?.subnets[0];
-  let proxySubnet = finalPool.proxySubnet;
   let needsProxyRecreate = false;
-
-  if (existingProxySubnet) {
-    if (cidrsOverlap(routedSubnet, existingProxySubnet)) {
-      const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
-      if (hasContainers) {
-        throw new Error(
-          `Existing Docker network 'traefik_proxy' (${existingProxySubnet}) collides with routed subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
-        );
-      }
-      needsProxyRecreate = true;
-      proxySubnet = cidrsOverlap(finalPool.proxySubnet, routedSubnet)
-        ? finalPool.routedSubnet
-        : finalPool.proxySubnet;
-    } else {
-      proxySubnet = existingProxySubnet;
+  if (proxyNet && proxyNet.subnets[0] && cidrsOverlap(routedSubnet, proxyNet.subnets[0])) {
+    const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
+    if (hasContainers) {
+      throw new Error(
+        `Existing Docker network 'traefik_proxy' (${proxyNet.subnets[0]}) collides with routed ingress subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
+      );
     }
-  } else if (cidrsOverlap(proxySubnet, routedSubnet)) {
-    // When preserving a legacy service subnet, the allocator's second candidate may be that
-    // same subnet. The allocator's first candidate is guaranteed distinct, so use it instead.
-    proxySubnet = finalPool.routedSubnet;
+    needsProxyRecreate = true;
   }
-
-  const dnsResolverIp = deriveDnsResolverIp(
-    routedSubnet,
-    10,
-    existingEnv.TS_DNS_SERVER,
-  );
 
   // 5.2 Private DNS Zone
   const recommendedZone = deriveDnsZoneFromHost(hostShort, "gg");
@@ -330,15 +328,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     ? cliOptions.tsRouterTag
     : `tag:${cliOptions.tsRouterTag}`;
 
-  // Routes to advertise (both TS_SERVICE_SUBNET and traefik_proxy)
+  // Routes to advertise: Tailscale advertises ONLY this ingress /24.
   const routesToAdvertise: string[] = [routedSubnet];
-  if (
-    proxySubnet &&
-    proxySubnet !== routedSubnet &&
-    !cidrsOverlap(routedSubnet, proxySubnet)
-  ) {
-    routesToAdvertise.push(proxySubnet);
-  }
 
   let dnsZonePlan = finalZone;
   if (hasDnsConflict) {
@@ -351,11 +342,10 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   p.note(
     [
       `Host:             ${hostShort}`,
-      `Docker pool:       ${finalPool.hostPool}`,
-      `Service subnet:    ${routedSubnet}`,
-      `Proxy subnet:      ${proxySubnet}`,
-      `Advertised routes: ${routesToAdvertise.join(", ")}`,
+      `Ingress subnet:    ${routedSubnet}`,
+      `Advertised route:  ${routedSubnet}`,
       `DNS resolver IP:   ${dnsResolverIp}`,
+      `Traefik IP:        ${traefikIp}`,
       `Private DNS zone:  ${dnsZonePlan}`,
       `Router tag:        ${resolvedTag}`,
       `Router hostname:   ${resolvedTsHostname}`,
@@ -389,34 +379,26 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   await ensureIpForwarding(cliOptions.dryRun);
   actionSpinner.stop("IPv4 packet forwarding verified");
 
-  // 6.2 Docker daemon.json
-  actionSpinner.start(`Configuring Docker daemon address pool (${finalPool.hostPool})`);
-  const { changed: daemonChanged } = await configureDaemonAddressPool(
-    finalPool.hostPool,
-    cliOptions.dryRun,
-  );
-  actionSpinner.stop(
-    daemonChanged
-      ? `Updated /etc/docker/daemon.json with default address pool ${finalPool.hostPool}`
-      : "Docker daemon address pool already up-to-date",
-  );
-
-  // 6.3 Docker external proxy network (explicit deterministic subnet)
+  // 6.2 Docker networks: ensure traefik_proxy and traefik_ingress
   if (needsProxyRecreate && !cliOptions.dryRun) {
     actionSpinner.start("Recreating colliding 'traefik_proxy' network");
     await removeDockerNetwork("traefik_proxy");
     actionSpinner.stop("Removed colliding 'traefik_proxy' network");
   }
-  if (needsServicesRecreate && !cliOptions.dryRun) {
-    actionSpinner.start("Recreating legacy 'tailscale_services' network");
-    await removeDockerNetwork("tailscale_services");
-    actionSpinner.stop("Removed legacy 'tailscale_services' network");
+  if (needsIngressRecreate && !cliOptions.dryRun && ingressNet) {
+    actionSpinner.start(`Recreating '${ingressNet.name}' network`);
+    await removeDockerNetwork(ingressNet.name);
+    actionSpinner.stop(`Removed '${ingressNet.name}' network`);
   }
-  actionSpinner.start(`Ensuring Docker 'traefik_proxy' network exists (${proxySubnet})`);
-  await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun, proxySubnet);
+  actionSpinner.start("Ensuring Docker 'traefik_proxy' network exists");
+  await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun);
   actionSpinner.stop("Docker 'traefik_proxy' network verified");
 
-  // 6.4 Tailscale Policy Update
+  actionSpinner.start(`Ensuring Docker 'traefik_ingress' network exists (${routedSubnet})`);
+  await ensureDockerNetwork("traefik_ingress", "bridge", cliOptions.dryRun, routedSubnet);
+  actionSpinner.stop("Docker 'traefik_ingress' network verified");
+
+  // 6.3 Tailscale Policy Update (only ingress /24)
   actionSpinner.start("Reconciling Tailscale ACL policy (tagOwners & autoApprovers.routes)");
   const policyRes = await reconcileTailscalePolicy({
     client: apiClient,
@@ -424,12 +406,11 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     etag: tailnet.etag,
     routerTag: resolvedTag,
     routedSubnet,
-    additionalRoutes: routesToAdvertise.filter((r) => r !== routedSubnet),
     dryRun: cliOptions.dryRun,
   });
   actionSpinner.stop(policyRes.reason);
 
-  // 6.5 Tailscale Split DNS
+  // 6.4 Tailscale Split DNS
   actionSpinner.start(`Configuring Tailscale split DNS (${finalZone} -> ${dnsResolverIp})`);
   const splitRes = await reconcileSplitDns({
     client: apiClient,
@@ -441,8 +422,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
   actionSpinner.stop(splitRes.reason);
 
-  // 6.6 Tailscale Router Reusable Auth Key (based on local state availability)
-  actionSpinner.start(`Ensuring reusable auth key for ${resolvedTag}`);
+  // 6.5 Tailscale Router Auth Key (single-use key if missing local state)
+  actionSpinner.start(`Checking Tailscale router state and credentials for ${resolvedTag}`);
   const tailscaleImage = existingEnv.TAILSCALE_IMAGE || process.env.TAILSCALE_IMAGE;
   const localStatePresent = await hasLocalTailscaleState(tailscaleImage, cliOptions.dryRun);
   const authKeyRes = await ensureRouterAuthKey({
@@ -456,25 +437,22 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
   actionSpinner.stop(
     authKeyRes.generated
-      ? `Generated reusable auth key (${redactSecret(authKeyRes.authKey)})`
-      : `Reusing existing auth key (${redactSecret(authKeyRes.authKey)})`,
+      ? `Generated short-lived single-use auth key (${redactSecret(authKeyRes.authKey)})`
+      : "Reusing persistent Tailscale volume state",
   );
 
-  // 6.7 Update Traefik .env
+  // 6.6 Update Traefik .env (transient auth key is NOT persisted)
   actionSpinner.start("Updating Traefik .env configuration");
-  const finalRoutesStr = routesToAdvertise.join(",");
   const traefikDomain = `traefik.${finalZone}`;
   const envUpdates: Record<string, string> = {
     TS_HOSTNAME: resolvedTsHostname,
-    TS_ROUTES: finalRoutesStr,
-    TS_SERVICE_SUBNET: routedSubnet,
+    TS_ROUTES: routedSubnet,
+    TS_INGRESS_SUBNET: routedSubnet,
     TS_DNS_SERVER: dnsResolverIp,
+    TRAEFIK_IP: traefikIp,
     TAIL_DOMAIN: finalZone,
-    DIRECT_DOMAIN: `dkr.${finalZone}`,
     TRAEFIK_DOMAIN: traefikDomain,
-    DOCKER_POOL: finalPool.hostPool,
     TS_ROUTER_TAG: resolvedTag,
-    TS_AUTHKEY: authKeyRes.authKey,
   };
 
   if (!cliOptions.dryRun) {
@@ -483,24 +461,17 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       await chmod(envPath, 0o600).catch(() => {});
     }
     await mergeEnvFile(envPath, envUpdates);
-
-    // Also update env/.env.tailscale.local if it exists or seed from example
-    const tailscaleEnvPath = resolve(repoRoot, "env/.env.tailscale.local");
-    const tailscaleExamplePath = resolve(repoRoot, "env/.env.tailscale.example");
-    if (!existsSync(tailscaleEnvPath) && existsSync(tailscaleExamplePath)) {
-      await copyFile(tailscaleExamplePath, tailscaleEnvPath);
-      await chmod(tailscaleEnvPath, 0o600).catch(() => {});
-    }
-    if (existsSync(tailscaleEnvPath)) {
-      await mergeEnvFile(tailscaleEnvPath, { TS_AUTHKEY: authKeyRes.authKey });
-    }
   }
   actionSpinner.stop("Traefik .env updated");
 
-  // 6.8 Start Traefik Stack
+  // 6.7 Start Traefik Stack
   if (!cliOptions.dryRun) {
     actionSpinner.start("Starting Traefik edge services (traefik, stepca, coredns, ts-router)");
-    await startTraefikStack(repoRoot, cliOptions.dryRun);
+    await startTraefikStack(
+      repoRoot,
+      cliOptions.dryRun,
+      authKeyRes.needed ? { TS_AUTHKEY: authKeyRes.authKey } : undefined,
+    );
     const health = await waitForTraefikHealthy(repoRoot);
     actionSpinner.stop(
       health.healthy
@@ -508,7 +479,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
         : "Traefik services started (some services may still be initializing)",
     );
 
-    // 6.9 Install Step CA Root Certificate
+    // 6.8 Install Step CA Root Certificate
     actionSpinner.start("Checking & installing Step CA root certificate");
     const caRes = await installRootCa(repoRoot, cliOptions.dryRun);
     actionSpinner.stop(caRes.reason);

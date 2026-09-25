@@ -23,6 +23,7 @@ services:
       TS_ROUTES: ${TS_ROUTES:-}
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
     env_file:
       - path: ${PWD}/env/.env.tailscale.local
         required: false
@@ -32,8 +33,7 @@ services:
       - tailscale:/var/lib/tailscale
       - ${PWD}/compose/tailscale/entrypoint.sh:/usr/local/bin/tailscale-entrypoint.sh:ro
     networks:
-      - proxy
-      - tailscale
+      - ingress
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -72,9 +72,8 @@ services:
         ENTRYPOINT ["/bin/sh", "/usr/src/app/entrypoint.sh"]
     restart: unless-stopped
     environment:
-      DIRECT_DOMAIN: ${DIRECT_DOMAIN:?}
       TAIL_DOMAIN: ${TAIL_DOMAIN:?}
-      TRAEFIK_DNS_NAME: traefik.docker.local
+      TRAEFIK_IP: ${TRAEFIK_IP:?}
     volumes:
       - ${PWD}/compose/tailscale/coredns/entrypoint.sh:/usr/src/app/entrypoint.sh:ro
       - ${PWD}/compose/tailscale/coredns/Corefile.gotpl:/usr/src/app/Corefile.gotpl:ro
@@ -82,8 +81,7 @@ services:
       - 53/tcp
       - 53/udp
     networks:
-      proxy:
-      tailscale:
+      ingress:
         ipv4_address: ${TS_DNS_SERVER:?}
     cap_add:
       - NET_BIND_SERVICE

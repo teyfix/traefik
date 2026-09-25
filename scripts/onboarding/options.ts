@@ -1,6 +1,17 @@
 import { parseArgs } from "node:util";
 import { z } from "zod";
 
+export const IngressSubnetSchema = z
+  .string()
+  .refine(
+    (val) =>
+      val === "auto" ||
+      /^10\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.0\/24$/.test(
+        val,
+      ),
+    { message: "Must be 'auto' or a valid 10.* /24 IPv4 CIDR (e.g. 10.128.64.0/24)" },
+  );
+
 export const DockerPoolSchema = z
   .string()
   .refine(
@@ -24,7 +35,8 @@ export const DnsZoneSchema = z
   );
 
 export const CliOptionsSchema = z.object({
-  dockerPool: DockerPoolSchema.optional(),
+  ingressSubnet: IngressSubnetSchema.optional(),
+  dockerPool: z.string().optional(),
   tsDnsZone: DnsZoneSchema.optional(),
   tsRouterTag: z.string().default("tag:docker"),
   tsHostname: z.string().optional(),
@@ -38,7 +50,8 @@ export const CliOptionsSchema = z.object({
 export type RawCliOptions = z.infer<typeof CliOptionsSchema>;
 
 export interface ResolvedOptions {
-  dockerPool: string; // CIDR or "auto"
+  ingressSubnet: string; // CIDR or "auto"
+  dockerPool?: string;
   tsDnsZone: string; // domain or "auto"
   tsRouterTag: string;
   tsHostname: string;
@@ -52,6 +65,7 @@ export function parseCliArgs(args: string[] = process.argv.slice(2)): RawCliOpti
   const { values } = parseArgs({
     args,
     options: {
+      "ingress-subnet": { type: "string" },
       "docker-pool": { type: "string" },
       "ts-dns-zone": { type: "string" },
       "ts-router-tag": { type: "string" },
@@ -67,6 +81,7 @@ export function parseCliArgs(args: string[] = process.argv.slice(2)): RawCliOpti
   });
 
   return CliOptionsSchema.parse({
+    ingressSubnet: values["ingress-subnet"],
     dockerPool: values["docker-pool"],
     tsDnsZone: values["ts-dns-zone"],
     tsRouterTag: values["ts-router-tag"] ?? "tag:docker",
@@ -86,18 +101,19 @@ Usage:
   TS_API_TOKEN="..." bun scripts/onboarding.ts [options]
 
 Options:
-  --docker-pool <cidr|auto>   Custom Docker address pool (e.g. 10.128.64.0/18 or "auto")
-  --ts-dns-zone <zone|auto>   Tailscale private split-DNS zone (e.g. dixie.gg or "auto")
-  --ts-router-tag <tag>       Tailscale tag for router device (default: tag:docker)
-  --ts-hostname <name>        Tailscale router hostname (default: $(hostname -s)-router)
-  --replace-split-dns         Overwrite existing Tailscale split-DNS resolver(s) for the zone if conflicting
-  --rotate-authkey            Force generation of a new Tailscale auth key instead of reusing existing key
-  -y, --yes                   Accept recommended/default values without confirmation
-  --dry-run                   Plan mutations without applying any changes
-  -h, --help                  Show this help text
+  --ingress-subnet <cidr|auto> Docker ingress /24 subnet (e.g. 10.128.64.0/24 or "auto")
+  --ts-dns-zone <zone|auto>    Tailscale private split-DNS zone (e.g. dixie.gg or "auto")
+  --ts-router-tag <tag>        Tailscale tag for router device (default: tag:docker)
+  --ts-hostname <name>         Tailscale router hostname (default: $(hostname -s)-router)
+  --replace-split-dns          Overwrite existing Tailscale split-DNS resolver(s) for the zone if conflicting
+  --rotate-authkey             Force generation of a new Tailscale auth key instead of reusing existing key
+  -y, --yes                    Accept recommended/default values without confirmation
+  --dry-run                    Plan mutations without applying any changes
+  -h, --help                   Show this help text
 
 Authentication:
   TS_API_TOKEN is transiently read from the environment and is never persisted to disk.
+  Short-lived single-use auth keys are provisioned for initial container registration and never persisted.
 `;
 }
 

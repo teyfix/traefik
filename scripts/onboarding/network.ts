@@ -118,6 +118,187 @@ export function deriveDnsResolverIp(
 }
 
 /**
+ * Calculates a stable Traefik IPv4 address belonging to the routed ingress subnet.
+ */
+export function deriveTraefikIp(
+  routedSubnetCidr: string,
+  offset = 2,
+  existingIp?: string,
+): string {
+  const range = parseCidr(routedSubnetCidr);
+  if (range.size < 4) {
+    throw new Error(`Routed subnet ${routedSubnetCidr} is too small for a Traefik IP.`);
+  }
+
+  if (existingIp && isIpInCidr(existingIp, routedSubnetCidr)) {
+    const existingVal = ipToInt(existingIp);
+    if (existingVal !== range.startInt && existingVal !== range.endInt) {
+      return existingIp;
+    }
+  }
+
+  if (offset <= 0 || offset >= range.size - 1) {
+    throw new Error(
+      `Offset ${offset} is outside the usable host range for subnet ${routedSubnetCidr} (size ${range.size})`,
+    );
+  }
+
+  const traefikInt = (range.startInt + offset) >>> 0;
+  return intToIp(traefikInt);
+}
+
+/**
+ * Checks if a CIDR is a valid 10.* /24 subnet.
+ */
+export function is10Slash24(cidr: string): boolean {
+  try {
+    const range = parseCidr(cidr);
+    if (range.prefix !== 24) return false;
+    const startTen = ipToInt("10.0.0.0");
+    const endTen = ipToInt("10.255.255.255");
+    return range.startInt >= startTen && range.endInt <= endTen;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if an existing ingress subnet is unambiguously owned by this host.
+ * Unambiguous means:
+ * - It is a valid 10.* /24 subnet.
+ * - No OTHER device on the Tailnet (including offline devices) claims/advertises this subnet.
+ * - It does not overlap with existing non-Docker local host routes.
+ */
+export function checkIngressSubnetOwnership(params: {
+  candidateSubnet: string;
+  tailnetDevices: Array<{
+    id?: string;
+    name?: string;
+    hostname?: string;
+    advertisedRoutes?: string[];
+    enabledRoutes?: string[];
+  }>;
+  routerHostname: string;
+  localRoutes?: string[];
+  ownDockerSubnets?: string[];
+}): { unambiguous: boolean; reason?: string } {
+  const { candidateSubnet, tailnetDevices, routerHostname, localRoutes = [], ownDockerSubnets = [] } = params;
+
+  if (!is10Slash24(candidateSubnet)) {
+    return {
+      unambiguous: false,
+      reason: `Subnet ${candidateSubnet} is not a valid 10.* /24 subnet.`,
+    };
+  }
+
+  const targetHost = routerHostname.toLowerCase();
+  for (const dev of tailnetDevices) {
+    const devHost = (dev.hostname || "").toLowerCase();
+    const devName = (dev.name || "").toLowerCase();
+    const isCurrentRouter =
+      devHost === targetHost ||
+      devName === targetHost ||
+      devName.startsWith(`${targetHost}.`);
+
+    if (isCurrentRouter) continue;
+
+    const devRoutes = [
+      ...(dev.advertisedRoutes || []),
+      ...(dev.enabledRoutes || []),
+    ];
+    for (const r of devRoutes) {
+      if (cidrsOverlap(candidateSubnet, r)) {
+        return {
+          unambiguous: false,
+          reason: `Subnet ${candidateSubnet} is claimed by another tailnet device (${dev.name || dev.hostname || dev.id || "unknown"}): ${r}`,
+        };
+      }
+    }
+  }
+
+  const ownSet = new Set(ownDockerSubnets);
+  for (const route of localRoutes) {
+    if (ownSet.has(route)) continue;
+    if (cidrsOverlap(candidateSubnet, route)) {
+      return {
+        unambiguous: false,
+        reason: `Subnet ${candidateSubnet} overlaps with local host route: ${route}`,
+      };
+    }
+  }
+
+  return { unambiguous: true };
+}
+
+export interface IngressSubnetAllocation {
+  ingressSubnet: string;
+  dnsResolverIp: string;
+  traefikIp: string;
+}
+
+/**
+ * Allocates a unique explicit 10.* Docker ingress /24 subnet per host.
+ * Preserves an existing ingress subnet only when ownership is unambiguous.
+ */
+export function allocateIngressSubnet(params: {
+  claimedRoutes: string[];
+  preferredSubnet?: string;
+  unambiguousSubnet?: string;
+  existingDnsIp?: string;
+  existingTraefikIp?: string;
+}): IngressSubnetAllocation {
+  const { claimedRoutes, preferredSubnet, unambiguousSubnet, existingDnsIp, existingTraefikIp } = params;
+
+  if (preferredSubnet && preferredSubnet !== "auto") {
+    if (!is10Slash24(preferredSubnet)) {
+      throw new Error(`Requested ingress subnet ${preferredSubnet} must be a valid 10.* /24 subnet.`);
+    }
+    const safeOwn = new Set(unambiguousSubnet ? [unambiguousSubnet] : []);
+    const conflicting = claimedRoutes.filter((r) => !safeOwn.has(r) && cidrsOverlap(preferredSubnet, r));
+    if (conflicting.length > 0) {
+      throw new Error(`Requested ingress subnet ${preferredSubnet} conflicts with claimed route(s): ${conflicting.join(", ")}`);
+    }
+    const dnsResolverIp = deriveDnsResolverIp(preferredSubnet, 10, existingDnsIp);
+    const traefikIp = deriveTraefikIp(preferredSubnet, 2, existingTraefikIp);
+    return { ingressSubnet: preferredSubnet, dnsResolverIp, traefikIp };
+  }
+
+  if (unambiguousSubnet) {
+    const dnsResolverIp = deriveDnsResolverIp(unambiguousSubnet, 10, existingDnsIp);
+    const traefikIp = deriveTraefikIp(unambiguousSubnet, 2, existingTraefikIp);
+    return { ingressSubnet: unambiguousSubnet, dnsResolverIp, traefikIp };
+  }
+
+  // Scan candidate 10.* /24 subnets in 10.128.0.0/16 first
+  const baseStart = ipToInt("10.128.0.0");
+  for (let i = 0; i < 256; i++) {
+    const candIp = intToIp((baseStart + i * 256) >>> 0);
+    const candCidr = `${candIp}/24`;
+    const hasConflict = claimedRoutes.some((r) => cidrsOverlap(candCidr, r));
+    if (!hasConflict) {
+      const dnsResolverIp = deriveDnsResolverIp(candCidr, 10, existingDnsIp);
+      const traefikIp = deriveTraefikIp(candCidr, 2, existingTraefikIp);
+      return { ingressSubnet: candCidr, dnsResolverIp, traefikIp };
+    }
+  }
+
+  // Fallback: search wider 10.0.0.0/8 space
+  const fullBase = ipToInt("10.0.0.0");
+  for (let s = 1; s < 65535; s++) {
+    const candIp = intToIp((fullBase + s * 256) >>> 0);
+    const candCidr = `${candIp}/24`;
+    const hasConflict = claimedRoutes.some((r) => cidrsOverlap(candCidr, r));
+    if (!hasConflict) {
+      const dnsResolverIp = deriveDnsResolverIp(candCidr, 10, existingDnsIp);
+      const traefikIp = deriveTraefikIp(candCidr, 2, existingTraefikIp);
+      return { ingressSubnet: candCidr, dnsResolverIp, traefikIp };
+    }
+  }
+
+  throw new Error("Could not find a non-overlapping 10.* /24 Docker ingress subnet.");
+}
+
+/**
  * Proposes a non-overlapping Docker host pool (/18) and a routed subnet (/24) within it.
  * Uses an RFC1918 space, by default candidate blocks in 10.128.0.0/9.
  *
