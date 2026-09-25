@@ -362,7 +362,9 @@ When the API reports `isEphemeral: false`, first record the old device ID,
 routes, and approvals and confirm the stored reusable key, tag ownership,
 route auto-approval, and key expiry. Then plan a separately authorized outage:
 
-1. Make a fresh, restorable backup of the task-owned `traefik_tailscale` state volume.
+1. Make a fresh backup of the task-owned `traefik_tailscale` state volume for
+   configuration recovery and investigation. It cannot revive a device after
+   that Tailnet identity is retired.
 2. Stop and remove only the `traefik_tailscale` router container.
 3. Retire only the old Tailnet device after matching its recorded hostname,
    tag, and device ID in the administration console.
@@ -383,7 +385,11 @@ disconnected legacy network, and rerun onboarding with the explicitly allocated
 API gate must still confirm `isEphemeral: true` and the approved ingress route
 before the DNS write. This combined legacy cutover is not an ordinary restart.
 
-If verification fails, stop the router, retire the failed new identity, restore
-the volume backup, and restart the old identity. Do not touch Step CA or ACME
-state, `traefik_proxy`, application containers, or application volumes during
-this migration.
+If replacement verification fails, stop the router and retire only a failed new
+identity that was actually created. Rollback is a new enrollment: confirm or
+replace the authorized reusable auth key, reset only the router state as
+separately authorized, rerun onboarding, and repeat the API and client checks.
+Restoring the backup alone cannot restore the retired identity because Tailnet
+deletion revoked its node key. Do not touch Step CA or ACME state,
+`traefik_proxy`, application containers, or application volumes during this
+migration.

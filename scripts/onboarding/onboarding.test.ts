@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1608,5 +1608,19 @@ describe("Router identity preflight", () => {
 
     expect(warning).toContain("router");
     expect(warning).toContain("A normal run stops before policy, network, credential, state, container, or split-DNS mutations");
+  });
+
+  test("runs Tailnet discovery and identity preflight before Docker installation", () => {
+    const cliSource = readFileSync(join(import.meta.dir, "cli.ts"), "utf-8");
+    const runCliSource = cliSource.slice(cliSource.indexOf("export async function runOnboardingCli"));
+    const tailnetDiscovery = runCliSource.indexOf("await inspectTailnet(apiClient)");
+    const identityPreflight = runCliSource.indexOf("assertRouterIdentityPreflight({");
+    const dockerInstallation = runCliSource.indexOf("await installDockerIfMissing(cliOptions.dryRun)");
+    const firstHostMutation = runCliSource.indexOf("await ensureIpForwarding(cliOptions.dryRun)");
+
+    expect(tailnetDiscovery).toBeGreaterThan(-1);
+    expect(identityPreflight).toBeGreaterThan(tailnetDiscovery);
+    expect(dockerInstallation).toBeGreaterThan(identityPreflight);
+    expect(firstHostMutation).toBeGreaterThan(identityPreflight);
   });
 });

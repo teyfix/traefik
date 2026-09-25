@@ -167,54 +167,9 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const repoRoot = resolve(import.meta.dir, "../..");
   p.intro("Traefik & Tailscale Ingress Onboarding");
 
-  // Phase 1: Host discovery
+  // Phase 1: Host and existing configuration discovery
   const hostShort = await getHostShortName();
   p.log.step(`Host: ${hostShort}`);
-
-  // Phase 2: Docker status
-  const s = p.spinner();
-  s.start("Checking Docker Engine status");
-  const dockerInstalled = await isDockerInstalled();
-  if (!dockerInstalled) {
-    s.stop("Docker Engine not found. Installing official Docker Engine...");
-    await installDockerIfMissing(cliOptions.dryRun);
-  } else {
-    const reachable = await isDockerDaemonReachable();
-    if (!reachable) {
-      s.stop("Docker daemon is unreachable. Please ensure Docker is running.");
-      process.exit(1);
-    }
-    s.stop("Docker Engine is ready");
-  }
-
-  // Phase 3: Tailscale API client and discovery
-  const apiToken = process.env.TS_API_TOKEN;
-  if (!apiToken) {
-    p.cancel(
-      "Tailscale API token missing.\n\n" +
-        "Please provide TS_API_TOKEN in your environment:\n" +
-        '  TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts [options]\n',
-    );
-    process.exit(1);
-  }
-
-  s.start("Inspecting Tailnet topology and routing");
-  let apiClient: TailscaleApiClient;
-  let tailnet: TailnetDiscovery;
-  try {
-    apiClient = new TailscaleApiClient(apiToken);
-    tailnet = await inspectTailnet(apiClient);
-    s.stop("Tailnet inspected: devices, routes, policy, and split-DNS discovered");
-  } catch (err) {
-    s.stop(`Failed to inspect Tailnet: ${(err as Error).message}`);
-    process.exit(1);
-  }
-
-  // Phase 4: Route and CIDR conflict aggregation
-  const [localRoutes, dockerNetworks] = await Promise.all([
-    getLocalRoutes(),
-    inspectDockerNetworks(),
-  ]);
 
   // Check existing .env in repo (do not treat template .example.env as live state)
   const envPath = resolve(repoRoot, ".env");
@@ -233,7 +188,32 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     } catch {}
   }
 
-  // Resolve router hostname and tag candidates early for device identity and ownership lookup
+  // Phase 2: Tailscale API discovery and identity safety preflight. This must
+  // complete before Docker installation or any other host/tailnet mutation.
+  const apiToken = process.env.TS_API_TOKEN;
+  if (!apiToken) {
+    p.cancel(
+      "Tailscale API token missing.\n\n" +
+        "Please provide TS_API_TOKEN in your environment:\n" +
+        '  TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts [options]\n',
+    );
+    process.exit(1);
+  }
+
+  const s = p.spinner();
+  s.start("Inspecting Tailnet topology and routing");
+  let apiClient: TailscaleApiClient;
+  let tailnet: TailnetDiscovery;
+  try {
+    apiClient = new TailscaleApiClient(apiToken);
+    tailnet = await inspectTailnet(apiClient);
+    s.stop("Tailnet inspected: devices, routes, policy, and split-DNS discovered");
+  } catch (err) {
+    s.stop(`Failed to inspect Tailnet: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
+  // Resolve router hostname and tag candidates for device identity and ownership lookup.
   const defaultTsHostname = `${hostShort}-router`;
   const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
   const rawTag = cliOptions.tsRouterTag || existingEnv.TS_ROUTER_TAG || "tag:docker";
@@ -247,6 +227,28 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     });
     if (identityWarning) p.log.warn(`Planned prerequisite:\n${identityWarning}`);
   }
+
+  // Phase 3: Docker status. A normal run cannot reach Docker installation until
+  // an existing router identity has been accepted by the Tailnet preflight.
+  s.start("Checking Docker Engine status");
+  const dockerInstalled = await isDockerInstalled();
+  if (!dockerInstalled) {
+    s.stop("Docker Engine not found. Installing official Docker Engine...");
+    await installDockerIfMissing(cliOptions.dryRun);
+  } else {
+    const reachable = await isDockerDaemonReachable();
+    if (!reachable) {
+      s.stop("Docker daemon is unreachable. Please ensure Docker is running.");
+      process.exit(1);
+    }
+    s.stop("Docker Engine is ready");
+  }
+
+  // Phase 4: Route and CIDR conflict aggregation
+  const [localRoutes, dockerNetworks] = await Promise.all([
+    getLocalRoutes(),
+    inspectDockerNetworks(),
+  ]);
 
   // Exempt only current traefik_ingress or legacy tailscale_services subnet when ownership is proven;
   // all other local Docker subnets are conflicts.
