@@ -12,6 +12,8 @@ export interface VerificationResult {
   message?: string;
 }
 
+export const DEFAULT_ROUTE_READINESS_TIMEOUT_MS = 120_000;
+
 export function verifyDeviceRoutes(
   routerDev: { advertisedRoutes?: string[]; enabledRoutes?: string[] },
   routesToCheck: string[],
@@ -56,7 +58,7 @@ export async function pollRouterDeviceAndRoutes(params: {
     tsHostname,
     routerTag,
     routesToCheck,
-    timeoutMs = 30000,
+    timeoutMs = DEFAULT_ROUTE_READINESS_TIMEOUT_MS,
     intervalMs = 2000,
   } = params;
 
@@ -184,7 +186,7 @@ export async function runVerification(params: {
         tsHostname,
         routerTag,
         routesToCheck,
-        timeoutMs: pollTimeoutMs ?? 30000,
+        timeoutMs: pollTimeoutMs ?? DEFAULT_ROUTE_READINESS_TIMEOUT_MS,
       });
 
       if (!pollRes.deviceFound) {
@@ -291,4 +293,3 @@ export async function runVerification(params: {
 
   return results;
 }
-

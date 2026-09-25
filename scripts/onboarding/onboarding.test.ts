@@ -28,6 +28,8 @@ import {
   DnsZoneSchema,
 } from "./options";
 import { deriveDnsZoneFromHost } from "./host";
+import { DEFAULT_SERVICE_HEALTH_TIMEOUT_MS } from "./traefik";
+import { DEFAULT_ROUTE_READINESS_TIMEOUT_MS } from "./verify";
 import {
   assertSplitDnsPrerequisites,
   reconcileSplitDns,
@@ -256,7 +258,7 @@ describe("Network & CIDR calculation", () => {
     expect(check4.unambiguous).toBe(false);
   });
 
-  test("assertNoActiveNetworkConflicts enforces direct docker stop/rm of task-owned containers without docker compose when old .env lacks TRAEFIK_IP", () => {
+  test("assertNoActiveNetworkConflicts gives missing-container-safe cleanup without docker compose", () => {
     // Model legacy .env missing TRAEFIK_IP
     const legacyEnvContent = [
       "TS_SERVICE_SUBNET=10.128.32.0/24",
@@ -284,13 +286,14 @@ describe("Network & CIDR calculation", () => {
     try {
       assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24");
     } catch (e: any) {
-      // Must use direct docker stop/rm of exact container names so missing TRAEFIK_IP in old .env does not fail Compose
-      expect(e.message).toContain("docker stop traefik_tailscale traefik_coredns");
-      expect(e.message).toContain("docker rm -f traefik_tailscale traefik_coredns");
+      // Ignore missing exact-name containers, then remove only the legacy network.
+      expect(e.message).toContain("docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true;");
       expect(e.message).toContain("docker network rm tailscale_services");
       expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
+      expect(e.message).toContain("preserving named volumes and unrelated networks");
       // Never use docker compose commands (which would fail during interpolation of TRAEFIK_IP:?)
       expect(e.message).not.toContain("docker compose");
+      expect(e.message).not.toContain("docker volume");
     }
 
     // 2. Differing traefik_ingress network with active containers
@@ -311,11 +314,12 @@ describe("Network & CIDR calculation", () => {
     try {
       assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24");
     } catch (e: any) {
-      expect(e.message).toContain("docker stop traefik traefik_tailscale traefik_coredns");
-      expect(e.message).toContain("docker rm -f traefik traefik_tailscale traefik_coredns");
+      expect(e.message).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true;");
       expect(e.message).toContain("docker network rm traefik_ingress");
       expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
+      expect(e.message).toContain("preserving named volumes and unrelated networks");
       expect(e.message).not.toContain("docker compose");
+      expect(e.message).not.toContain("docker volume");
     }
 
     // 3. Inactive legacy and matching ingress networks pass without throwing
@@ -359,7 +363,7 @@ describe("Network & CIDR calculation", () => {
     // In dryRun mode (dryRun = true), it does not throw and returns warning
     const dryRunLegacy = assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24", true);
     expect(dryRunLegacy.warning).toBeDefined();
-    expect(dryRunLegacy.warning).toContain("docker stop traefik_tailscale traefik_coredns");
+    expect(dryRunLegacy.warning).toContain("docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true;");
     expect(dryRunLegacy.warning).toContain("docker network rm tailscale_services");
 
     // Differing traefik_ingress network with active containers
@@ -380,8 +384,39 @@ describe("Network & CIDR calculation", () => {
     const dryRunIngress = assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24", true);
     expect(dryRunIngress.needsIngressRecreate).toBe(true);
     expect(dryRunIngress.warning).toBeDefined();
-    expect(dryRunIngress.warning).toContain("docker stop traefik traefik_tailscale traefik_coredns");
+    expect(dryRunIngress.warning).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true;");
     expect(dryRunIngress.warning).toContain("docker network rm traefik_ingress");
+  });
+
+  test("preserves non-conflicting Compose-managed networks", () => {
+    const composeNetworks = [
+      {
+        name: "traefik_proxy",
+        id: "proxy-net",
+        driver: "bridge",
+        subnets: ["172.20.0.0/16"],
+        containers: ["application-backend"],
+        labels: {
+          "com.docker.compose.project": "traefik",
+          "com.docker.compose.network": "proxy",
+        },
+      },
+      {
+        name: "traefik_ingress",
+        id: "ingress-net",
+        driver: "bridge",
+        subnets: ["10.128.64.0/24"],
+        containers: ["traefik"],
+        labels: {
+          "com.docker.compose.project": "traefik",
+          "com.docker.compose.network": "ingress",
+        },
+      },
+    ];
+
+    const result = assertNoActiveNetworkConflicts(composeNetworks, "10.128.64.0/24");
+    expect(result.needsProxyRecreate).toBe(false);
+    expect(result.needsIngressRecreate).toBe(false);
   });
 
   test("allocateIngressSubnet allocates unique 10.* /24 per host and derives static IPs", () => {
@@ -801,7 +836,12 @@ describe("CLI resolution contract", () => {
 });
 
 describe("Tailscale API Client semantics", () => {
-  test("creates reusable tagged auth key payload", async () => {
+  test("readiness polling defaults cover 30-second health probes", () => {
+    expect(DEFAULT_SERVICE_HEALTH_TIMEOUT_MS).toBe(120_000);
+    expect(DEFAULT_ROUTE_READINESS_TIMEOUT_MS).toBe(120_000);
+  });
+
+  test("creates single-use tagged auth key payload", async () => {
     let capturedBody: any;
     const mockFetch = async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).endsWith("/keys")) {
@@ -925,7 +965,7 @@ describe("Tailscale API Client semantics", () => {
     expect(dryRunForce.reason).toContain("replacing [1.2.3.4]");
   });
 
-  test("ensureRouterAuthKey regenerates key when unregistered or forced", async () => {
+  test("ensureRouterAuthKey generates a key only when local state is missing", async () => {
     let keysCreated = 0;
     const mockFetch = async () => {
       keysCreated++;

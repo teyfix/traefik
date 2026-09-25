@@ -14,7 +14,6 @@ import {
   isDockerDaemonReachable,
   installDockerIfMissing,
   inspectDockerNetworks,
-  ensureDockerNetwork,
   hasLocalTailscaleState,
   type DockerNetworkInfo,
 } from "./docker";
@@ -68,7 +67,7 @@ export function assertNoActiveNetworkConflicts(
     if (hasContainers) {
       const msg =
         `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
-        "Run 'docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).";
+        "Run 'docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true; docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services. This removes only the legacy network, preserving named volumes and unrelated networks (e.g. traefik_proxy).";
       if (dryRun) {
         warnings.push(msg);
       } else {
@@ -84,7 +83,7 @@ export function assertNoActiveNetworkConflicts(
     if (hasContainers) {
       const msg =
         `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. ` +
-        "Run 'docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).";
+        "Run 'docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true; docker network rm traefik_ingress' then rerun onboarding CLI to write configuration and start services. This removes only the conflicting ingress network, preserving named volumes and unrelated networks (e.g. traefik_proxy).";
       if (dryRun) {
         warnings.push(msg);
       } else {
@@ -413,7 +412,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   await ensureIpForwarding(cliOptions.dryRun);
   actionSpinner.stop("IPv4 packet forwarding verified");
 
-  // 6.2 Docker networks: ensure traefik_proxy and traefik_ingress
+  // 6.2 Remove only legacy or conflicting networks. Compose creates its
+  // labeled traefik_proxy and traefik_ingress networks after .env is written.
   if (legacyServicesNet && !cliOptions.dryRun) {
     actionSpinner.start("Removing legacy 'tailscale_services' network");
     await removeDockerNetwork("tailscale_services");
@@ -429,14 +429,6 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     await removeDockerNetwork(ingressNet.name);
     actionSpinner.stop(`Removed '${ingressNet.name}' network`);
   }
-  actionSpinner.start("Ensuring Docker 'traefik_proxy' network exists");
-  await ensureDockerNetwork("traefik_proxy", "bridge", cliOptions.dryRun);
-  actionSpinner.stop("Docker 'traefik_proxy' network verified");
-
-  actionSpinner.start(`Ensuring Docker 'traefik_ingress' network exists (${routedSubnet})`);
-  await ensureDockerNetwork("traefik_ingress", "bridge", cliOptions.dryRun, routedSubnet);
-  actionSpinner.stop("Docker 'traefik_ingress' network verified");
-
   // 6.3 Tailscale Policy Update (only ingress /24)
   actionSpinner.start("Reconciling Tailscale ACL policy (tagOwners & autoApprovers.routes)");
   const policyRes = await reconcileTailscalePolicy({
@@ -523,7 +515,6 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       tsHostname: resolvedTsHostname,
       routerTag: resolvedTag,
       routesToCheck: routesToAdvertise,
-      timeoutMs: 30000,
     });
     if (!routerStatus.deviceFound) {
       actionSpinner.stop("Router device not found on Tailnet");

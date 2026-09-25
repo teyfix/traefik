@@ -5,6 +5,8 @@ export interface ServiceStatus {
   running: boolean;
 }
 
+export const DEFAULT_SERVICE_HEALTH_TIMEOUT_MS = 120_000;
+
 export async function startTraefikStack(
   repoRoot: string,
   dryRun = false,
@@ -75,7 +77,7 @@ export async function getTraefikServicesStatus(
 
 export async function waitForTraefikHealthy(
   repoRoot: string,
-  timeoutMs = 30000,
+  timeoutMs = DEFAULT_SERVICE_HEALTH_TIMEOUT_MS,
 ): Promise<{ healthy: boolean; details: Record<string, string> }> {
   const startTime = Date.now();
   const requiredServices = ["traefik", "stepca", "coredns", "tailscale"];
@@ -110,4 +112,3 @@ export async function waitForTraefikHealthy(
 
   return { healthy: false, details };
 }
-

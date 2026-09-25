@@ -289,20 +289,24 @@ private split DNS plus Step CA does not satisfy those provider-specific checks.
 When migrating an existing host from legacy two-subnet (`tailscale_services`) or
 earlier ingress configurations to the single ingress /24 architecture:
 
-1. **Stop and remove legacy task-owned containers**:
+1. **Remove legacy task-owned containers and only the conflicting network**:
    If an existing `tailscale_services` network has active containers:
    ```bash
-   docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services
+   docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm tailscale_services
    ```
    If recreating an existing `traefik_ingress` network:
    ```bash
-   docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress
+   docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm traefik_ingress
    ```
    > [!NOTE]
-   > Direct `docker stop` and `docker rm -f` of exact container names avoids
+   > Direct `docker rm -f` of exact container names tolerates containers that
+   > are already absent and avoids
    > `docker compose` configuration parsing failures when legacy `.env` files
-   > lack `TRAEFIK_IP`, and ensures shared application networks (such as
-   > `traefik_proxy`) are preserved without disruption.
+   > lack `TRAEFIK_IP`. The commands remove only the named legacy or conflicting
+   > network, preserving named volumes and unrelated networks such as
+   > `traefik_proxy`.
 
 2. **Scrub stale legacy variables**:
    The onboarding CLI automatically scrubs legacy keys (`TS_API_TOKEN`,

@@ -7,6 +7,7 @@ export interface DockerNetworkInfo {
   driver: string;
   subnets: string[];
   containers?: string[];
+  labels?: Record<string, string>;
 }
 
 export async function isDockerInstalled(): Promise<boolean> {
@@ -94,6 +95,7 @@ export async function inspectDockerNetworks(): Promise<DockerNetworkInfo[]> {
         driver: item.Driver,
         subnets,
         containers: item.Containers ? Object.keys(item.Containers) : [],
+        labels: item.Labels || {},
       };
     });
   } catch {
@@ -207,40 +209,6 @@ export async function configureDaemonAddressPool(
   }
 
   return { changed: true, restarted: true, needsReload: true };
-}
-
-export async function ensureDockerNetwork(
-  networkName: string,
-  driver = "bridge",
-  dryRun = false,
-  subnet?: string,
-): Promise<void> {
-  try {
-    const inspectProc = Bun.spawn(["docker", "network", "inspect", networkName], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const code = await inspectProc.exited;
-    if (code === 0) return; // Network already exists
-  } catch {}
-
-  if (dryRun) return;
-
-  const args = ["docker", "network", "create", "--driver", driver];
-  if (subnet) {
-    args.push("--subnet", subnet);
-  }
-  args.push(networkName);
-
-  const createProc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const createCode = await createProc.exited;
-  if (createCode !== 0) {
-    const err = await new Response(createProc.stderr).text();
-    throw new Error(`Failed to create Docker network ${networkName}: ${err}`);
-  }
 }
 
 export async function removeDockerNetwork(networkName: string): Promise<void> {

@@ -110,15 +110,17 @@ for initial connector registration. The router preserves its state in the persis
 
 When upgrading an existing checkout to the ingress-only architecture:
 
-1. **Clean up legacy networks and containers**: If upgrading a host with active containers on the legacy `tailscale_services` network, stop and remove task-owned containers directly by name and remove the network:
+1. **Clean up legacy networks and containers**: If upgrading a host with active containers on the legacy `tailscale_services` network, remove task-owned containers directly by exact name, tolerating containers that are already absent, and then remove the legacy network:
    ```bash
-   docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services
+   docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm tailscale_services
    ```
    If recreating an existing `traefik_ingress` network:
    ```bash
-   docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress
+   docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm traefik_ingress
    ```
-   Direct `docker stop` and `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`, and prevents dropping shared application networks like `traefik_proxy`.
+   Direct `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`. These commands remove only the named legacy or conflicting network; they preserve named volumes and unrelated networks such as `traefik_proxy`.
 
 2. **Scrub legacy keys**: Stale legacy variables (`TS_API_TOKEN`, `TS_AUTHKEY`, `DOCKER_POOL`, `TS_SERVICE_SUBNET`, `DIRECT_DOMAIN`, `TS_ROUTES` from `env/.env.tailscale.local`) are automatically scrubbed by the onboarding CLI. Auth keys are short-lived single-use keys and never persisted to disk; Tailscale state is preserved in the persistent `tailscale` Docker volume. Persisting `TS_AUTHKEY` in `.env` or `env/.env.tailscale.local` is obsolete.
 
