@@ -167,7 +167,9 @@ export function is10Slash24(cidr: string): boolean {
  * Unambiguous means:
  * - It is a valid 10.* /24 subnet.
  * - No OTHER device on the Tailnet (including offline devices) claims/advertises this subnet.
- * - It does not overlap with existing non-Docker local host routes.
+ *   Recognizing own router requires matching hostname AND configured router tag.
+ * - It does not overlap with existing local host routes or unrelated local Docker networks.
+ *   Exempts only proven current traefik_ingress or legacy tailscale_services subnets.
  */
 export function checkIngressSubnetOwnership(params: {
   candidateSubnet: string;
@@ -175,14 +177,25 @@ export function checkIngressSubnetOwnership(params: {
     id?: string;
     name?: string;
     hostname?: string;
+    tags?: string[];
     advertisedRoutes?: string[];
     enabledRoutes?: string[];
   }>;
   routerHostname: string;
+  routerTag?: string;
   localRoutes?: string[];
+  localDockerSubnets?: string[];
   ownDockerSubnets?: string[];
 }): { unambiguous: boolean; reason?: string } {
-  const { candidateSubnet, tailnetDevices, routerHostname, localRoutes = [], ownDockerSubnets = [] } = params;
+  const {
+    candidateSubnet,
+    tailnetDevices,
+    routerHostname,
+    routerTag,
+    localRoutes = [],
+    localDockerSubnets = [],
+    ownDockerSubnets = [],
+  } = params;
 
   if (!is10Slash24(candidateSubnet)) {
     return {
@@ -192,13 +205,23 @@ export function checkIngressSubnetOwnership(params: {
   }
 
   const targetHost = routerHostname.toLowerCase();
+  const normalizedTag = routerTag
+    ? (routerTag.startsWith("tag:") ? routerTag : `tag:${routerTag}`)
+    : undefined;
+
   for (const dev of tailnetDevices) {
     const devHost = (dev.hostname || "").toLowerCase();
     const devName = (dev.name || "").toLowerCase();
-    const isCurrentRouter =
+    const isNameMatch =
       devHost === targetHost ||
       devName === targetHost ||
       devName.startsWith(`${targetHost}.`);
+
+    // Require configured router tag when recognizing own router;
+    // same-hostname untagged host-native Tailscale nodes must NOT be treated as own router.
+    const isCurrentRouter =
+      isNameMatch &&
+      Boolean(normalizedTag && dev.tags && dev.tags.includes(normalizedTag));
 
     if (isCurrentRouter) continue;
 
@@ -217,6 +240,19 @@ export function checkIngressSubnetOwnership(params: {
   }
 
   const ownSet = new Set(ownDockerSubnets);
+
+  // Check against local Docker network subnets: all Docker subnets other than proven ownDockerSubnets are conflicts
+  for (const dockerSubnet of localDockerSubnets) {
+    if (ownSet.has(dockerSubnet)) continue;
+    if (cidrsOverlap(candidateSubnet, dockerSubnet)) {
+      return {
+        unambiguous: false,
+        reason: `Subnet ${candidateSubnet} overlaps with unrelated local Docker network subnet: ${dockerSubnet}`,
+      };
+    }
+  }
+
+  // Check against local host routes: exempt proven ownDockerSubnets
   for (const route of localRoutes) {
     if (ownSet.has(route)) continue;
     if (cidrsOverlap(candidateSubnet, route)) {

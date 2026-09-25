@@ -16,6 +16,7 @@ import {
   inspectDockerNetworks,
   ensureDockerNetwork,
   hasLocalTailscaleState,
+  type DockerNetworkInfo,
 } from "./docker";
 import {
   allocateIngressSubnet,
@@ -28,7 +29,6 @@ import {
   reconcileTailscalePolicy,
   ensureRouterAuthKey,
   reconcileSplitDns,
-  findRouterDevice,
   assertSplitDnsPrerequisites,
   type TailnetDiscovery,
 } from "./tailscale";
@@ -53,6 +53,51 @@ async function removeDockerNetwork(networkName: string): Promise<void> {
       `Failed to remove Docker network '${networkName}': ${stderr.trim() || `exit code ${code}`}`,
     );
   }
+}
+
+export function assertNoActiveNetworkConflicts(
+  dockerNetworks: DockerNetworkInfo[],
+  routedSubnet: string,
+): { needsIngressRecreate: boolean; needsProxyRecreate: boolean } {
+  // Check existing legacy and ingress networks on host
+  const legacyServicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
+  if (legacyServicesNet) {
+    const hasContainers = Boolean(legacyServicesNet.containers && legacyServicesNet.containers.length > 0);
+    if (hasContainers) {
+      throw new Error(
+        `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
+          "Run 'docker compose stop tailscale coredns && docker compose rm -f tailscale coredns && docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).",
+      );
+    }
+  }
+
+  const ingressNet = dockerNetworks.find((n) => n.name === "traefik_ingress");
+  let needsIngressRecreate = false;
+  if (ingressNet && ingressNet.subnets[0] && ingressNet.subnets[0] !== routedSubnet) {
+    const hasContainers = Boolean(ingressNet.containers && ingressNet.containers.length > 0);
+    if (hasContainers) {
+      throw new Error(
+        `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. ` +
+          "Run 'docker compose stop traefik tailscale coredns && docker compose rm -f traefik tailscale coredns && docker network rm traefik_ingress' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).",
+      );
+    }
+    needsIngressRecreate = true;
+  }
+
+  // Check traefik_proxy network collision with routed ingress subnet
+  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
+  let needsProxyRecreate = false;
+  if (proxyNet && proxyNet.subnets[0] && cidrsOverlap(routedSubnet, proxyNet.subnets[0])) {
+    const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
+    if (hasContainers) {
+      throw new Error(
+        `Existing Docker network 'traefik_proxy' (${proxyNet.subnets[0]}) collides with routed ingress subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
+      );
+    }
+    needsProxyRecreate = true;
+  }
+
+  return { needsIngressRecreate, needsProxyRecreate };
 }
 
 export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)): Promise<void> {
@@ -132,31 +177,17 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     } catch {}
   }
 
-  // Resolve router hostname candidate early for device identity lookup
+  // Resolve router hostname and tag candidates early for device identity and ownership lookup
   const defaultTsHostname = `${hostShort}-router`;
   const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
+  const rawTag = cliOptions.tsRouterTag || existingEnv.TS_ROUTER_TAG || "tag:docker";
+  const resolvedTag = rawTag.startsWith("tag:") ? rawTag : `tag:${rawTag}`;
 
-  // Identify subnets owned by this router so reruns do not treat them as external conflicts
-  const ownSubnets: string[] = [];
-  for (const net of dockerNetworks) {
-    if (net.name === "traefik_ingress" || net.name === "tailscale_services") {
-      ownSubnets.push(...net.subnets);
-    }
-  }
-  if (existingEnv.TS_INGRESS_SUBNET) {
-    ownSubnets.push(existingEnv.TS_INGRESS_SUBNET);
-  }
-  if (existingEnv.TS_SERVICE_SUBNET && !ownSubnets.includes(existingEnv.TS_SERVICE_SUBNET)) {
-    ownSubnets.push(existingEnv.TS_SERVICE_SUBNET);
-  }
-
-  // Include advertised routes of any existing router device on tailnet matching this exact hostname
-  const existingRouterDevice = findRouterDevice(tailnet.devices, resolvedTsHostname);
-  if (existingRouterDevice?.advertisedRoutes) {
-    for (const r of existingRouterDevice.advertisedRoutes) {
-      if (!ownSubnets.includes(r)) ownSubnets.push(r);
-    }
-  }
+  // Exempt only current traefik_ingress or legacy tailscale_services subnet when ownership is proven;
+  // all other local Docker subnets are conflicts.
+  const provenOwnDockerSubnets = dockerNetworks
+    .filter((n) => n.name === "traefik_ingress" || n.name === "tailscale_services")
+    .flatMap((n) => n.subnets);
 
   const localDockerSubnets = dockerNetworks.flatMap((n) => n.subnets);
 
@@ -189,8 +220,10 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       candidateSubnet: candidateExistingSubnet,
       tailnetDevices: tailnet.devices,
       routerHostname: resolvedTsHostname,
+      routerTag: resolvedTag,
       localRoutes,
-      ownDockerSubnets: localDockerSubnets,
+      localDockerSubnets,
+      ownDockerSubnets: provenOwnDockerSubnets,
     });
     if (ownership.unambiguous) {
       unambiguousSubnet = candidateExistingSubnet;
@@ -249,41 +282,11 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
 
   // Check existing legacy and ingress networks on host
   const legacyServicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
-  if (legacyServicesNet) {
-    const hasContainers = Boolean(legacyServicesNet.containers && legacyServicesNet.containers.length > 0);
-    if (hasContainers) {
-      throw new Error(
-        `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
-          "Run 'docker compose stop tailscale coredns && docker compose rm -f tailscale coredns && docker network rm tailscale_services && docker compose up -d --force-recreate traefik tailscale coredns' to safely migrate without dropping shared networks (e.g. traefik_proxy).",
-      );
-    }
-  }
-
   const ingressNet = dockerNetworks.find((n) => n.name === "traefik_ingress");
-  let needsIngressRecreate = false;
-  if (ingressNet && ingressNet.subnets[0] && ingressNet.subnets[0] !== routedSubnet) {
-    const hasContainers = Boolean(ingressNet.containers && ingressNet.containers.length > 0);
-    if (hasContainers) {
-      throw new Error(
-        `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. ` +
-          "Run 'docker compose stop tailscale coredns && docker compose rm -f tailscale coredns && docker network rm traefik_ingress && docker compose up -d --force-recreate traefik tailscale coredns' to migrate without dropping shared networks (e.g. traefik_proxy).",
-      );
-    }
-    needsIngressRecreate = true;
-  }
-
-  // Check traefik_proxy network collision with routed ingress subnet
-  const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
-  let needsProxyRecreate = false;
-  if (proxyNet && proxyNet.subnets[0] && cidrsOverlap(routedSubnet, proxyNet.subnets[0])) {
-    const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
-    if (hasContainers) {
-      throw new Error(
-        `Existing Docker network 'traefik_proxy' (${proxyNet.subnets[0]}) collides with routed ingress subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`,
-      );
-    }
-    needsProxyRecreate = true;
-  }
+  const { needsIngressRecreate, needsProxyRecreate } = assertNoActiveNetworkConflicts(
+    dockerNetworks,
+    routedSubnet,
+  );
 
   // 5.2 Private DNS Zone
   const recommendedZone = deriveDnsZoneFromHost(hostShort, "gg");
@@ -336,11 +339,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     }
   }
 
-  // 5.3 Router Tag
-  const resolvedTag = cliOptions.tsRouterTag.startsWith("tag:")
-    ? cliOptions.tsRouterTag
-    : `tag:${cliOptions.tsRouterTag}`;
-
+  // 5.3 Router Tag (already resolved early)
   // Routes to advertise: Tailscale advertises ONLY this ingress /24.
   const routesToAdvertise: string[] = [routedSubnet];
 

@@ -33,6 +33,7 @@ import {
   reconcileSplitDns,
   type SplitDnsPrerequisites,
 } from "./tailscale";
+import { assertNoActiveNetworkConflicts } from "./cli";
 
 describe("Network & CIDR calculation", () => {
   test("parses CIDR correctly", () => {
@@ -156,6 +157,7 @@ describe("Network & CIDR calculation", () => {
         id: "dev-1",
         hostname: "other-router",
         name: "other-router.tailnet.ts.net",
+        tags: ["tag:docker"],
         advertisedRoutes: ["10.128.1.0/24"],
         enabledRoutes: ["10.128.1.0/24"],
       },
@@ -163,25 +165,71 @@ describe("Network & CIDR calculation", () => {
         id: "dev-2",
         hostname: "my-host-router",
         name: "my-host-router.tailnet.ts.net",
+        tags: ["tag:docker"],
         advertisedRoutes: ["10.128.64.0/24"],
         enabledRoutes: ["10.128.64.0/24"],
       },
     ];
 
-    // Unambiguous: owned by current router and not conflicting
+    // Unambiguous: owned by current router (with matching tag) and not conflicting
     const check1 = checkIngressSubnetOwnership({
       candidateSubnet: "10.128.64.0/24",
       tailnetDevices: devices,
       routerHostname: "my-host-router",
+      routerTag: "tag:docker",
       localRoutes: ["192.168.1.0/24"],
     });
     expect(check1.unambiguous).toBe(true);
+
+    // Negative test: same-hostname untagged host-native node must NOT be treated as own router
+    const checkUntagged = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.64.0/24",
+      tailnetDevices: [
+        {
+          id: "dev-untagged",
+          hostname: "my-host-router",
+          name: "my-host-router.tailnet.ts.net",
+          tags: [], // Untagged host-native Tailscale node
+          advertisedRoutes: ["10.128.64.0/24"],
+          enabledRoutes: ["10.128.64.0/24"],
+        },
+      ],
+      routerHostname: "my-host-router",
+      routerTag: "tag:docker",
+      localRoutes: ["192.168.1.0/24"],
+    });
+    expect(checkUntagged.unambiguous).toBe(false);
+    expect(checkUntagged.reason).toContain("claimed by another tailnet device");
+
+    // Negative test: overlaps with unrelated local Docker network subnet
+    const checkDockerConflict = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.5.0/24",
+      tailnetDevices: devices,
+      routerHostname: "my-host-router",
+      routerTag: "tag:docker",
+      localDockerSubnets: ["10.128.5.0/24", "172.19.0.0/16"],
+      ownDockerSubnets: [], // Neither traefik_ingress nor tailscale_services owns 10.128.5.0/24
+    });
+    expect(checkDockerConflict.unambiguous).toBe(false);
+    expect(checkDockerConflict.reason).toContain("overlaps with unrelated local Docker network subnet");
+
+    // Positive test: candidate matches proven own Docker subnet (traefik_ingress)
+    const checkProvenOwn = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.64.0/24",
+      tailnetDevices: devices,
+      routerHostname: "my-host-router",
+      routerTag: "tag:docker",
+      localDockerSubnets: ["10.128.64.0/24", "172.19.0.0/16"],
+      ownDockerSubnets: ["10.128.64.0/24"], // Proven ownership
+    });
+    expect(checkProvenOwn.unambiguous).toBe(true);
 
     // Ambiguous / conflicting: claimed by another tailnet device (even if offline)
     const check2 = checkIngressSubnetOwnership({
       candidateSubnet: "10.128.1.0/24",
       tailnetDevices: devices,
       routerHostname: "my-host-router",
+      routerTag: "tag:docker",
       localRoutes: ["192.168.1.0/24"],
     });
     expect(check2.unambiguous).toBe(false);
@@ -192,6 +240,7 @@ describe("Network & CIDR calculation", () => {
       candidateSubnet: "10.128.64.0/24",
       tailnetDevices: devices,
       routerHostname: "my-host-router",
+      routerTag: "tag:docker",
       localRoutes: ["10.128.64.0/24"],
     });
     expect(check3.unambiguous).toBe(false);
@@ -202,8 +251,84 @@ describe("Network & CIDR calculation", () => {
       candidateSubnet: "172.20.0.0/24",
       tailnetDevices: devices,
       routerHostname: "my-host-router",
+      routerTag: "tag:docker",
     });
     expect(check4.unambiguous).toBe(false);
+  });
+
+  test("assertNoActiveNetworkConflicts enforces stopping only task-owned services without broad down or pre-CLI up", () => {
+    // 1. Legacy tailscale_services network with active containers
+    const legacyActive = [
+      {
+        name: "tailscale_services",
+        id: "net-1",
+        driver: "bridge",
+        subnets: ["10.128.32.0/24"],
+        containers: ["container-ts-1"],
+      },
+    ];
+
+    expect(() =>
+      assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24"),
+    ).toThrowError(/Existing legacy Docker network 'tailscale_services'/);
+
+    try {
+      assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24");
+    } catch (e: any) {
+      expect(e.message).toContain("docker compose stop tailscale coredns");
+      expect(e.message).toContain("docker compose rm -f tailscale coredns");
+      expect(e.message).toContain("docker network rm tailscale_services");
+      expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
+      expect(e.message).not.toContain("docker compose up");
+      expect(e.message).not.toContain("docker compose down");
+    }
+
+    // 2. Differing traefik_ingress network with active containers
+    const ingressActive = [
+      {
+        name: "traefik_ingress",
+        id: "net-2",
+        driver: "bridge",
+        subnets: ["10.128.32.0/24"],
+        containers: ["container-ingress-1"],
+      },
+    ];
+
+    expect(() =>
+      assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24"),
+    ).toThrowError(/Existing Docker network 'traefik_ingress'/);
+
+    try {
+      assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24");
+    } catch (e: any) {
+      expect(e.message).toContain("docker compose stop traefik tailscale coredns");
+      expect(e.message).toContain("docker compose rm -f traefik tailscale coredns");
+      expect(e.message).toContain("docker network rm traefik_ingress");
+      expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
+      expect(e.message).not.toContain("docker compose up");
+      expect(e.message).not.toContain("docker compose down");
+    }
+
+    // 3. Inactive legacy and matching ingress networks pass without throwing
+    const inactiveNetworks = [
+      {
+        name: "tailscale_services",
+        id: "net-1",
+        driver: "bridge",
+        subnets: ["10.128.32.0/24"],
+        containers: [],
+      },
+      {
+        name: "traefik_ingress",
+        id: "net-2",
+        driver: "bridge",
+        subnets: ["10.128.64.0/24"],
+        containers: ["some-container"],
+      },
+    ];
+
+    const res = assertNoActiveNetworkConflicts(inactiveNetworks, "10.128.64.0/24");
+    expect(res.needsIngressRecreate).toBe(false);
   });
 
   test("allocateIngressSubnet allocates unique 10.* /24 per host and derives static IPs", () => {
