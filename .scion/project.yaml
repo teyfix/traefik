@@ -1,0 +1,9 @@
+version: 1
+project:
+  name: Traefik
+  slug: traefik
+  defaultBranch: main
+  workspaceMode: worktree-per-agent
+
+issueDispatch:
+  enabled: false
