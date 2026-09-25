@@ -33,7 +33,10 @@ when that authority already exists.
    another machine's network. Missing route ownership or masks block network
    changes even when the DNS page is available.
 3. State the selected suffix, application names, destination ingress, and
-   subnet ownership. If the developer only needs access to existing services,
+   subnet ownership. Ingress uses one explicit routed ingress /24
+   (`TS_INGRESS_SUBNET`) containing Tailscale, CoreDNS (`TS_DNS_SERVER`), and
+   Traefik (`TRAEFIK_IP`), with backends isolated on private unadvertised
+   `traefik_proxy`. If the developer only needs access to existing services,
    use the existing Tailnet and public CA certificate; do not bootstrap a
    second infrastructure stack.
 4. Inspect the existing environment inputs and how Task/Compose loads them.
@@ -70,24 +73,28 @@ required check without blocking unrelated work.
 
 ## Suffix configuration
 
-- `TAIL_DOMAIN` selects the ordinary DNS zone; `DIRECT_DOMAIN` selects the
-  direct-container zone. `TRAEFIK_DOMAIN` selects the dashboard hostname.
-  Inspect other service hostnames and application-owned routes separately.
+- `TAIL_DOMAIN` selects the private DNS zone. `TRAEFIK_DOMAIN` selects the
+  dashboard hostname. Inspect other service hostnames and application-owned
+  routes separately. Direct-container DNS zones (`DIRECT_DOMAIN`) and direct
+  container routes are eliminated under the ingress-only architecture.
 - For an explicitly selected independent `babo.gg` installation, the relevant
-  DNS inputs are `TAIL_DOMAIN=babo.gg` and `DIRECT_DOMAIN=dkr.babo.gg`.
-  These are configuration examples, not authorization to start a second
-  router or change Tailnet settings. The domain values have no leading dot.
-- `compose/tailscale/coredns/Corefile.gotpl` already reads these inputs.
-  `entrypoint.sh` renders the runtime Corefile. Do not edit the template,
-  entrypoint, or generated Corefile to substitute a developer's suffix.
-- The current template serves one ordinary zone and its direct zone. Selecting
-  another suffix replaces that installation's zones; it does not add another
-  zone alongside the existing one. Serving both suffixes on shared ingress
-  requires an explicitly scoped infrastructure change.
+  DNS input is `TAIL_DOMAIN=babo.gg`. This is a configuration example, not
+  authorization to start a second router or change Tailnet settings. The
+  domain value has no leading dot.
+- `compose/tailscale/coredns/Corefile.gotpl` already reads `TAIL_DOMAIN` and
+  synthesizes wildcard A records to `TRAEFIK_IP`. `entrypoint.sh` renders
+  the runtime Corefile. Do not edit the template, entrypoint, or generated
+  Corefile to substitute a developer's suffix.
+- The current template serves a single private zone (`TAIL_DOMAIN`). Selecting
+  another suffix replaces that installation's zone; it does not add another
+  zone alongside the existing one. Serving multiple suffixes on shared
+  ingress requires an explicitly scoped infrastructure change.
 - Tailnet restricted nameservers must route each selected suffix to its actual
-  resolver. Application routes and certificates must match the intended
-  hostname. A wildcard DNS response alone does not prove those boundaries.
-  Keep shared service endpoints at their actual names.
+  resolver. Split-DNS configuration is suffix-specific: registering or
+  updating an installation's suffix preserves all unrelated split-DNS zones
+  and routes on the tailnet. Application routes and certificates must match the
+  intended hostname. A wildcard DNS response alone does not prove those
+  boundaries. Keep shared service endpoints at their actual names.
 
 ## Shared infrastructure boundary
 
@@ -102,13 +109,26 @@ existing `tail.gg` settings globally to satisfy a personal `babo.gg` request.
 Do not reset volumes, recreate a CA, delete certificates, or use insecure TLS
 to make a setup check pass.
 
-Share the public CA certificate and required access invitations. Keep auth
-keys and other credential material in the documented ignored configuration;
-never copy CA private keys or another machine's Tailscale identity. Report
-missing access or a shared configuration gap with one precise next action.
-Configuration presence is not runtime verification.
+Share the public CA certificate and required access invitations. `TS_API_TOKEN`
+is transient and must never be written to disk. The onboarding CLI provisions a
+short-lived, single-use tagged router auth key (`TS_AUTHKEY`) injected
+transiently for initial registration. The router preserves its identity in the
+persistent `traefik_tailscale` Docker volume without persisting `TS_AUTHKEY`
+to disk or `.env`. Persisted `TS_AUTHKEY` is obsolete and scrubbed. Never copy
+CA private keys or another machine's Tailscale identity. Report missing access
+or a shared configuration gap with one precise next action. Configuration
+presence is not runtime verification.
 
 A tagged auth key can satisfy existing auto-approval/access policy. Confirm
 the supplied policy rather than asking to edit it again. Tags do not allocate
-addresses or configure route advertisements. Preserve the distinction between
-private local Docker networks and subnets exposed through Tailscale.
+addresses or configure route advertisements. The subnet router advertises
+solely the dedicated ingress /24 (`TS_INGRESS_SUBNET`) containing Tailscale,
+CoreDNS, and Traefik. Application backends remain isolated on the private,
+unadvertised `traefik_proxy` network.
+
+If migrating an existing host with active legacy `tailscale_services` or
+`traefik_ingress` containers, run targeted container stop and removal:
+`docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services`
+(or for ingress: `docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress`).
+This avoids Compose failures on legacy `.env` files lacking `TRAEFIK_IP` and
+preserves shared application networks such as `traefik_proxy`.

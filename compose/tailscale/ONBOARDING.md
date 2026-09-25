@@ -30,7 +30,7 @@ existing Tailnet for every contributor.
 |Target|Machine identity and whether this is access to existing services or operation of independent ingress.|
 |Names|Requested suffix, existing shared endpoints, and the split-DNS mapping already configured or authorized.|
 |Networks|Exact allocated CIDRs and reserved DNS/router/ingress IPs, with enough existing route information to check overlaps.|
-|Access|Assigned tag/auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat.|
+|Access|Transient TS_API_TOKEN or short-lived auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat or persist TS_AUTHKEY to disk.|
 
 The ingress configuration uses the following ingress-only architecture:
 
@@ -88,9 +88,13 @@ subnet router. Follow that application's own guide for development tooling.
 Keep shared ingress, DNS and any other existing service endpoints under their
 existing owners and at their actual names. A personal application suffix
 does not rename those services. Use the developer's own credentials and
-authorized access. Keep real secrets in the documented ignored files; share
-placeholder examples and public CA certificates only. Do not copy another
-person's login files or create dummy credentials to pass setup.
+authorized access. `TS_API_TOKEN` is transient and provided only in the process
+environment; router auth keys (`TS_AUTHKEY`) are short-lived single-use keys
+injected transiently for initial container registration. State is preserved in
+the persistent `traefik_tailscale` volume without persisting `TS_AUTHKEY` to disk
+or `.env`. Keep real secrets in the documented ignored files; share placeholder
+examples and public CA certificates only. Do not copy another person's login
+files or create dummy credentials to pass setup.
 
 ## Application contributor path
 
@@ -158,10 +162,18 @@ to start. Resolve missing inputs and obtain authorization for that concrete
 scope before applying it; reuse authorization already given for the same
 scope. Continue independent read-only work while blocked.
 
-Use `TAIL_DOMAIN` and `DIRECT_DOMAIN` for an authorized independent
-installation's zones. A personal suffix does not require changing
+Use `TAIL_DOMAIN` for an authorized independent installation's zone.
+Direct-container DNS (`DIRECT_DOMAIN`) and routing are eliminated under the
+ingress-only architecture. A personal suffix does not require changing
 `Corefile.gotpl`. Adding another zone to the shared resolver is a separately
 scoped implementation change. Preserve existing shared service endpoint names.
+
+When migrating an existing host with active legacy `tailscale_services` or
+`traefik_ingress` containers, run targeted container stop and removal:
+`docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services`
+(or for ingress: `docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress`).
+This avoids Compose failures on legacy `.env` files lacking `TRAEFIK_IP` and
+preserves shared application networks such as `traefik_proxy`.
 
 ## Verification from the actual client
 

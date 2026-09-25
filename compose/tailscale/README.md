@@ -132,13 +132,12 @@ This repository owns:
 - Traefik and Step CA
 - the persistent Tailscale connector and its state
 - CoreDNS and split-DNS behavior for the configured private suffix
-- the shared `traefik_proxy` and `tailscale_services` networks
+- the shared `traefik_proxy` and routed `traefik_ingress` networks
 
 Each application project owns:
 
 - its Traefik labels, router names, host rules, middleware, and service ports
 - its OAuth clients and exact callback paths
-- the decision to opt an individual container into direct access
 - workload-specific Tailscale sidecars, such as a dedicated egress connector
 
 After this shared stack is verified, a project should remove only its old
@@ -189,7 +188,9 @@ In the [Tailscale DNS administration page](https://login.tailscale.com/admin/dns
 
 MagicDNS and the restricted nameserver are separate settings. MagicDNS handles
 tailnet device names; the restricted nameserver makes CoreDNS authoritative for
-this private development suffix.
+this private development suffix. Split-DNS configuration is suffix-specific:
+adding or updating an installation's suffix preserves all unrelated split-DNS
+zones and routes configured on the tailnet.
 
 > [!CAUTION]
 > Split DNS shadows public records under the same suffix on tailnet clients.
@@ -204,10 +205,13 @@ Finally, create a Tailscale auth key from the
 - non-ephemeral, because this connector has a persistent identity
 - reusable disabled (a short-lived single-use key)
 
-Never commit auth keys or API tokens. In the onboarding CLI flow, `TS_AUTHKEY` is
-injected transiently into the initial container startup environment and is
-never written to `.env`. The connector's Docker volume (`traefik_tailscale`) preserves
-its state in `/var/lib/tailscale/tailscaled.state`, so the key is needed only for initial
+Never commit auth keys or API tokens. `TS_API_TOKEN` is transient and supplied
+only in the process environment. In the onboarding CLI flow, short-lived single-use
+`TS_AUTHKEY` credentials are provisioned on demand and injected transiently into the
+initial container startup environment; they are never written to `.env`. Persisting
+`TS_AUTHKEY` in `.env` or `env/.env.tailscale.local` is obsolete. The connector's
+Docker volume (`traefik_tailscale`) preserves its identity and state in
+`/var/lib/tailscale/tailscaled.state`, so an auth key is needed only for initial
 registration or after deliberately deleting that state.
 
 ## Start and verify
@@ -279,3 +283,33 @@ Step CA certificates are private certificates. Every browser, OS, SDK, or
 container that connects must trust this repository's Step CA root. Some OAuth
 providers also require public reachability or a publicly trusted certificate;
 private split DNS plus Step CA does not satisfy those provider-specific checks.
+
+## Migration from legacy setups
+
+When migrating an existing host from legacy two-subnet (`tailscale_services`) or
+earlier ingress configurations to the single ingress /24 architecture:
+
+1. **Stop and remove legacy task-owned containers**:
+   If an existing `tailscale_services` network has active containers:
+   ```bash
+   docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services
+   ```
+   If recreating an existing `traefik_ingress` network:
+   ```bash
+   docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress
+   ```
+   > [!NOTE]
+   > Direct `docker stop` and `docker rm -f` of exact container names avoids
+   > `docker compose` configuration parsing failures when legacy `.env` files
+   > lack `TRAEFIK_IP`, and ensures shared application networks (such as
+   > `traefik_proxy`) are preserved without disruption.
+
+2. **Scrub stale legacy variables**:
+   The onboarding CLI automatically scrubs legacy keys (`TS_API_TOKEN`,
+   `TS_AUTHKEY`, `DOCKER_POOL`, `TS_SERVICE_SUBNET`, `DIRECT_DOMAIN`, and
+   `TS_ROUTES` from `env/.env.tailscale.local`).
+
+3. **Single routed ingress subnet**:
+   Update `.env` to advertise solely `TS_INGRESS_SUBNET` (e.g. `10.10.10.0/24`)
+   as `TS_ROUTES`, with static IPs for `TS_DNS_SERVER` and `TRAEFIK_IP`. Application
+   backends remain on the private, unadvertised `traefik_proxy` network.

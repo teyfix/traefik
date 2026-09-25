@@ -340,6 +340,50 @@ describe("Network & CIDR calculation", () => {
     expect(res.needsIngressRecreate).toBe(false);
   });
 
+  test("assertNoActiveNetworkConflicts in dryRun mode returns warning without throwing on active legacy or differing ingress networks", () => {
+    const legacyActive = [
+      {
+        name: "tailscale_services",
+        id: "net-1",
+        driver: "bridge",
+        subnets: ["10.128.32.0/24"],
+        containers: ["traefik_tailscale", "traefik_coredns"],
+      },
+    ];
+
+    // In normal mode (dryRun = false), it throws
+    expect(() =>
+      assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24", false),
+    ).toThrowError(/Existing legacy Docker network 'tailscale_services'/);
+
+    // In dryRun mode (dryRun = true), it does not throw and returns warning
+    const dryRunLegacy = assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24", true);
+    expect(dryRunLegacy.warning).toBeDefined();
+    expect(dryRunLegacy.warning).toContain("docker stop traefik_tailscale traefik_coredns");
+    expect(dryRunLegacy.warning).toContain("docker network rm tailscale_services");
+
+    // Differing traefik_ingress network with active containers
+    const ingressActive = [
+      {
+        name: "traefik_ingress",
+        id: "net-2",
+        driver: "bridge",
+        subnets: ["10.128.32.0/24"],
+        containers: ["traefik", "traefik_tailscale", "traefik_coredns"],
+      },
+    ];
+
+    expect(() =>
+      assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24", false),
+    ).toThrowError(/Existing Docker network 'traefik_ingress'/);
+
+    const dryRunIngress = assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24", true);
+    expect(dryRunIngress.needsIngressRecreate).toBe(true);
+    expect(dryRunIngress.warning).toBeDefined();
+    expect(dryRunIngress.warning).toContain("docker stop traefik traefik_tailscale traefik_coredns");
+    expect(dryRunIngress.warning).toContain("docker network rm traefik_ingress");
+  });
+
   test("allocateIngressSubnet allocates unique 10.* /24 per host and derives static IPs", () => {
     const claimedRoutes = [
       "10.128.0.0/24", // claimed by offline device

@@ -101,35 +101,37 @@ $EDITOR .env
 ```
 
 Complete the one-time tailnet policy, route-approval, DNS, and auth-key setup in
-[`compose/tailscale/README.md`](compose/tailscale/README.md). Put `TS_AUTHKEY`
-only in the documented gitignored local environment file; never commit it.
+[`compose/tailscale/README.md`](compose/tailscale/README.md). Under the transient
+auth-key contract, `TS_AUTHKEY` is a short-lived, single-use key used transiently
+for initial connector registration. The router preserves its state in the persistent
+`tailscale` (`traefik_tailscale`) Docker volume; do not persist `TS_AUTHKEY` to disk or `.env`.
 
 ### Existing checkout migration
 
-This repository used to track root `.env`. The migration that introduces
-`.example.env` removes `.env` from Git, so an existing checkout can lose an
-unmodified local `.env` when pulling the change. Preserve it before updating:
+When upgrading an existing checkout to the ingress-only architecture:
 
-```bash
-mkdir -p .local
-cp --backup=numbered .env .local/.env.before-example-env-migration
-```
+1. **Clean up legacy networks and containers**: If upgrading a host with active containers on the legacy `tailscale_services` network, stop and remove task-owned containers directly by name and remove the network:
+   ```bash
+   docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services
+   ```
+   If recreating an existing `traefik_ingress` network:
+   ```bash
+   docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress
+   ```
+   Direct `docker stop` and `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`, and prevents dropping shared application networks like `traefik_proxy`.
 
-GNU `cp --backup=numbered` preserves any backup already at that path as a
-numbered sibling before writing the current `.env`.
+2. **Scrub legacy keys**: Stale legacy variables (`TS_API_TOKEN`, `TS_AUTHKEY`, `DOCKER_POOL`, `TS_SERVICE_SUBNET`, `DIRECT_DOMAIN`, `TS_ROUTES` from `env/.env.tailscale.local`) are automatically scrubbed by the onboarding CLI. Auth keys are short-lived single-use keys and never persisted to disk; Tailscale state is preserved in the persistent `tailscale` Docker volume. Persisting `TS_AUTHKEY` in `.env` or `env/.env.tailscale.local` is obsolete.
 
-After updating, restore the file if Git removed it:
-
-```bash
-test -f .env || cp .local/.env.before-example-env-migration .env
-docker compose config --quiet
-```
-
-Keep the restored `.env` local and ignored. If `TS_AUTHKEY` was stored in the
-legacy `env/.env.tailscale.local` file, either leave that file in place for
-compatibility or move the `TS_AUTHKEY` line into root `.env`. The persistent
-Tailscale state volume normally means the key is needed only for first
-registration or after deliberately deleting connector state.
+3. **Preserve local `.env`**: If migrating from very old checkouts that tracked root `.env`:
+   ```bash
+   mkdir -p .local
+   cp --backup=numbered .env .local/.env.before-example-env-migration
+   ```
+   After updating, restore if Git removed it:
+   ```bash
+   test -f .env || cp .local/.env.before-example-env-migration .env
+   docker compose config --quiet
+   ```
 
 ### 3. Render and start the environment
 
@@ -193,17 +195,17 @@ Then follow these steps to install the certificate:
 
 ### 6. Attach an application project
 
-For the normal HTTPS path, attach a service to `traefik_proxy` and keep its
+Attach application services exclusively to `traefik_proxy` and declare standard
 project-owned Traefik labels. A host such as
-`api.project.dev.example.test` resolves to Traefik, which then selects the
-project router.
+`api.project.dev.example.test` resolves to Traefik's static IP (`TRAEFIK_IP`) on
+the routed `traefik_ingress` network, and Traefik forwards traffic to the backend
+on `traefik_proxy`.
 
-Direct container access is opt-in and uses an exact alias such as
-`hello.project.dkr.dev.example.test` on the external `tailscale_services`
-network. It
-bypasses Traefik security and TLS. See the
-[`tailscale-direct` recipe](recipes/tailscale-direct/README.md) before using
-that path.
+Under the ingress-only architecture, application backends remain isolated on the
+private, unadvertised `traefik_proxy` network. Direct container exposure, direct
+DNS zones, and direct routes (such as `tailscale_services` or `DIRECT_DOMAIN`)
+are eliminated; all traffic enters through Traefik for centralized TLS termination,
+routing, and access control.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
@@ -348,42 +350,41 @@ https://localhost:9000
 
 ## 🌐 Network Architecture
 
-This stack exposes application services through two distinct paths:
+This stack exposes application services through a single ingress-only path:
 
-- Ordinary names such as `api.project.dev.example.test` resolve through
-  CoreDNS at the configured `TS_DNS_SERVER` to Traefik's Docker address. The
-  project service only needs the `traefik_proxy` network and its own labels.
-- Direct names such as `hello.project.dkr.dev.example.test` resolve through
-  Docker embedded DNS to the exact alias of a container explicitly joined to
-  `tailscale_services`.
-
-Tailscale routes the returned IP, not the hostname. CoreDNS selects the
-destination address class. The subnet router advertises the configured service
-subnet for CoreDNS/direct containers and the approved Docker/Traefik route.
+- Hostnames such as `api.project.dev.example.test` resolve through CoreDNS
+  at the configured `TS_DNS_SERVER` to Traefik's static ingress address
+  (`TRAEFIK_IP`) on `traefik_ingress`.
+- The Tailscale subnet router advertises solely the dedicated, explicit
+  ingress /24 subnet (`TS_INGRESS_SUBNET`) containing Tailscale, CoreDNS, and
+  Traefik.
+- Backend services attach exclusively to the private, unadvertised
+  `traefik_proxy` network. Traefik bridges incoming traffic from `traefik_ingress`
+  to backends on `traefik_proxy`. Direct container routes and direct-container DNS
+  (`DIRECT_DOMAIN`) are eliminated.
 
 Traefik publishes ports `80`, `443`, `8080`, and `4040` only on
 `127.0.0.1`. Host-local clients can still use those published ports, while
 ordinary LAN clients cannot reach them through a host interface. Tailnet
-clients instead reach Traefik's Docker address through the approved
-subnet route. This boundary depends on restrictive Tailscale grants:
+clients instead reach Traefik's static IP through the approved
+ingress route. This boundary depends on restrictive Tailscale grants:
 private DNS names are service discovery, not authorization.
 
-Certificate validation additionally uses this configuration:
+Certificate validation uses this configuration:
 
 - **Step CA** runs in `network_mode: host` to use the host's tailnet split DNS
   and advertised routes during ACME challenges
 - **Traefik** connects to Step CA via `host.docker.internal:9000` for
   certificate requests
-- **Services** run on the `traefik_proxy` bridge network for proper service
-  discovery
+- **Services** run on the private `traefik_proxy` bridge network for proper
+  service discovery
 
 > [!IMPORTANT]  
 > Step CA must use host networking so ACME validation follows the same tailnet
 > DNS and routed Docker path as clients.
 
-The complete tailnet policy, split-DNS, route, ownership, direct-container, and
-migration contract is documented in
-[`compose/tailscale/README.md`](compose/tailscale/README.md).
+The complete tailnet policy, split-DNS, route, ownership, and migration contract
+is documented in [`compose/tailscale/README.md`](compose/tailscale/README.md).
 
 ---
 
@@ -396,8 +397,10 @@ migration contract is documented in
   routed Docker address and must be restricted with Tailscale grants
 - Private DNS records do not authorize access or replace application
   authentication for sensitive services
-- Direct exposure bypasses Traefik TLS, middleware, and auth
-- Broad Docker routing can overlap client LAN, VPN, or Docker networks
+- All ingress traffic passes through Traefik; direct container bypass routes
+  and direct DNS zones are eliminated
+- Using a single dedicated ingress /24 avoids broad Docker subnet routing and
+  prevents CIDR collisions with client LAN, VPN, or Docker networks
 - Tailnet split DNS shadows public records under the same suffix
 
 Using an owned suffix provides stable OAuth callback names, but providers such
