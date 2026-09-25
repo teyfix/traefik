@@ -42,7 +42,11 @@ import {
 import { parseEnv, mergeEnvFile, writeTailscaleSecretFile } from "./env";
 import { installRootCa } from "./certificates";
 import { startTraefikStack, waitForTraefikHealthy } from "./traefik";
-import { runVerification, pollRouterDeviceAndRoutes } from "./verify";
+import {
+  runVerification,
+  pollRouterDeviceAndRoutes,
+  inspectLocalIngressRouteReadiness,
+} from "./verify";
 import { existsSync } from "node:fs";
 import { readFile, copyFile, chmod } from "node:fs/promises";
 
@@ -573,6 +577,18 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
         : "Traefik services started (some services may still be initializing)",
     );
 
+    actionSpinner.start("Verifying local Docker ingress route selection");
+    const localRouteReadiness = await inspectLocalIngressRouteReadiness({
+      routedSubnet,
+      dnsResolverIp,
+      traefikIp,
+    });
+    actionSpinner.stop(
+      localRouteReadiness.ready
+        ? "Local Docker ingress route selection verified"
+        : "Local Docker ingress route selection failed; split DNS will be preserved",
+    );
+
     // 6.7 Verify router device & route approval before publishing split DNS
     actionSpinner.start("Verifying Tailscale router connection and route approval");
     const routerStatus = await pollRouterDeviceAndRoutes({
@@ -600,6 +616,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     assertSplitDnsPrerequisites({
       servicesHealthy: health.healthy,
       unhealthyDetails: health.healthy ? undefined : "Traefik or CoreDNS container failed healthcheck",
+      localIngressRouteReady: localRouteReadiness.ready,
+      localIngressRouteDetails: localRouteReadiness.details,
       routerFound: routerStatus.deviceFound,
       routerIsEphemeral: routerStatus.routerIsEphemeral,
       routerTagMatched: routerStatus.tagMatched,

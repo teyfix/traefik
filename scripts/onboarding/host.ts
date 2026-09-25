@@ -23,7 +23,8 @@ export function renderLocalIngressRouteService(routedSubnet: string): string {
   const escapedSubnet = routedSubnet.replace(/\./g, "[.]");
   const renderedRulePattern =
     `^${LOCAL_INGRESS_ROUTE_PRIORITY}:[[:space:]]+from all to ${escapedSubnet} lookup main suppress_prefixlength 0$`;
-  return `[Unit]
+  return `# Managed by Traefik onboarding; validate ownership before removal.
+[Unit]
 Description=Prefer the local Docker ingress route over Tailscale's accepted copy
 After=network-online.target docker.service tailscaled.service
 Wants=network-online.target
@@ -37,6 +38,15 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 `;
+}
+
+// Exact renderer from a6df8e4. Hosts that installed this version remain owned
+// and can be adopted safely after the managed comment was added.
+function renderA6df8e4LocalIngressRouteService(routedSubnet: string): string {
+  return renderLocalIngressRouteService(routedSubnet).replace(
+    "# Managed by Traefik onboarding; validate ownership before removal.\n",
+    "",
+  );
 }
 
 function normalizeRuleLine(line: string): string {
@@ -75,12 +85,15 @@ function hasLegacyLocalRouteRule(rulesOutput: string, routedSubnet: string): boo
   );
 }
 
-function managedUnitSubnet(unitContent: string): string | undefined {
+export function managedLocalIngressRouteUnitSubnet(unitContent: string): string | undefined {
   const subnet = new RegExp(
     `rule del pref ${LOCAL_INGRESS_ROUTE_PRIORITY} to ([0-9.]+\\/\\d+) lookup main`,
   ).exec(unitContent)?.[1];
   if (!subnet || !is10Slash24(subnet)) return undefined;
-  return unitContent === renderLocalIngressRouteService(subnet) ? subnet : undefined;
+  return unitContent === renderLocalIngressRouteService(subnet) ||
+      unitContent === renderA6df8e4LocalIngressRouteService(subnet)
+    ? subnet
+    : undefined;
 }
 
 export function assertLocalRoutePriorityAvailable(
@@ -124,6 +137,34 @@ async function runCommand(command: string[], errorMessage: string): Promise<stri
   return stdout;
 }
 
+async function getLocalRouteServiceState(): Promise<{ enabled: boolean; active: boolean }> {
+  const inspect = async (
+    subcommand: "is-enabled" | "is-active",
+    inactiveCodes: number[],
+  ): Promise<boolean> => {
+    const proc = Bun.spawn(
+      ["sudo", "systemctl", subcommand, LOCAL_INGRESS_ROUTE_SERVICE],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    if (code === 0) return true;
+    if (inactiveCodes.includes(code)) return false;
+    throw new Error(
+      `Failed to inspect whether ${LOCAL_INGRESS_ROUTE_SERVICE} ${subcommand === "is-enabled" ? "is enabled" : "is active"} ` +
+      `(exit code ${code}): ${stderr.trim() || stdout.trim()}`,
+    );
+  };
+
+  return {
+    enabled: await inspect("is-enabled", [1, 3, 4]),
+    active: await inspect("is-active", [3, 4]),
+  };
+}
+
 /**
  * Persists a destination-scoped policy rule ahead of Tailscale table 52.
  * suppress_prefixlength 0 excludes the main default route, so lookup can fall
@@ -135,6 +176,7 @@ export async function ensureLocalIngressRoutePreference(
   dependencies: {
     unitPath?: string;
     runCommand?: typeof runCommand;
+    getServiceState?: typeof getLocalRouteServiceState;
   } = {},
 ): Promise<void> {
   const desiredUnit = renderLocalIngressRouteService(routedSubnet);
@@ -142,11 +184,12 @@ export async function ensureLocalIngressRoutePreference(
 
   const unitPath = dependencies.unitPath || LOCAL_INGRESS_ROUTE_UNIT_PATH;
   const execute = dependencies.runCommand || runCommand;
+  const inspectServiceState = dependencies.getServiceState || getLocalRouteServiceState;
   let existingUnit = "";
   if (existsSync(unitPath)) {
     existingUnit = await readFile(unitPath, "utf-8");
   }
-  const previousSubnet = managedUnitSubnet(existingUnit);
+  const previousSubnet = managedLocalIngressRouteUnitSubnet(existingUnit);
   if (existingUnit && !previousSubnet) {
     throw new Error(
       `Refusing to overwrite unrecognized systemd unit '${unitPath}'. Move or remove it explicitly before rerunning onboarding.`,
@@ -164,12 +207,47 @@ export async function ensureLocalIngressRoutePreference(
   assertLegacyLocalRouteSafe(rulesOutput, routedSubnet);
 
   const unitChanged = existingUnit !== desiredUnit;
-  if (unitChanged && existingUnit) {
-    await execute(
-      ["sudo", "systemctl", "stop", LOCAL_INGRESS_ROUTE_SERVICE],
-      `Failed to stop the previous ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+  const subnetChanged = Boolean(previousSubnet && previousSubnet !== routedSubnet);
+  const previousRuleWasActive = previousSubnet
+    ? hasDesiredLocalRouteRule(rulesOutput, previousSubnet)
+    : false;
+  const previousServiceState = subnetChanged
+    ? await inspectServiceState()
+    : undefined;
+  if (
+    subnetChanged &&
+    previousServiceState &&
+    previousServiceState.active !== previousRuleWasActive
+  ) {
+    throw new Error(
+      `Refusing to change the managed ingress subnet because ${LOCAL_INGRESS_ROUTE_SERVICE} ` +
+      `is ${previousServiceState.active ? "active" : "inactive"} while its exact priority-${LOCAL_INGRESS_ROUTE_PRIORITY} rule ` +
+      `is ${previousRuleWasActive ? "present" : "missing"}; reconcile this ambiguous state before rerunning onboarding`,
     );
-    if (previousSubnet) {
+  }
+
+  const installUnit = async (content: string): Promise<void> => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "traefik-route-unit-"));
+    const temporaryUnit = join(temporaryDirectory, LOCAL_INGRESS_ROUTE_SERVICE);
+    try {
+      await writeFile(temporaryUnit, content, { mode: 0o644 });
+      await execute(
+        ["sudo", "install", "-m", "0644", temporaryUnit, unitPath],
+        `Failed to install ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+      );
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  };
+
+  let oldStateDisturbed = false;
+  try {
+    if (subnetChanged) {
+      await execute(
+        ["sudo", "systemctl", "stop", LOCAL_INGRESS_ROUTE_SERVICE],
+        `Failed to stop the previous ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+      );
+      oldStateDisturbed = true;
       const previousRule =
         `pref ${LOCAL_INGRESS_ROUTE_PRIORITY} to ${previousSubnet} lookup main`;
       await execute(
@@ -182,58 +260,99 @@ export async function ensureLocalIngressRoutePreference(
         "Failed to remove the previous local ingress route preference",
       );
     }
-  }
 
-  if (unitChanged) {
-    const temporaryDirectory = await mkdtemp(join(tmpdir(), "traefik-route-unit-"));
-    const temporaryUnit = join(temporaryDirectory, LOCAL_INGRESS_ROUTE_SERVICE);
-    try {
-      await writeFile(temporaryUnit, desiredUnit, { mode: 0o644 });
+    if (unitChanged) {
+      await installUnit(desiredUnit);
       await execute(
-        ["sudo", "install", "-m", "0644", temporaryUnit, unitPath],
-        `Failed to install ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+        ["sudo", "systemctl", "daemon-reload"],
+        "Failed to reload systemd after installing the ingress route preference",
       );
-    } finally {
-      await rm(temporaryDirectory, { recursive: true, force: true });
     }
-    await execute(
-      ["sudo", "systemctl", "daemon-reload"],
-      "Failed to reload systemd after installing the ingress route preference",
-    );
-  }
 
-  await execute(
-    ["sudo", "systemctl", "enable", "--now", LOCAL_INGRESS_ROUTE_SERVICE],
-    `Failed to enable ${LOCAL_INGRESS_ROUTE_SERVICE}`,
-  );
-  if (!unitChanged && !hasDesiredLocalRouteRule(rulesOutput, routedSubnet)) {
     await execute(
-      ["sudo", "systemctl", "restart", LOCAL_INGRESS_ROUTE_SERVICE],
-      `Failed to restore the local ingress route preference`,
+      ["sudo", "systemctl", "enable", "--now", LOCAL_INGRESS_ROUTE_SERVICE],
+      `Failed to enable ${LOCAL_INGRESS_ROUTE_SERVICE}`,
     );
-  }
+    if (!unitChanged && !hasDesiredLocalRouteRule(rulesOutput, routedSubnet)) {
+      await execute(
+        ["sudo", "systemctl", "restart", LOCAL_INGRESS_ROUTE_SERVICE],
+        `Failed to restore the local ingress route preference`,
+      );
+    }
 
-  const activeRules = await execute(
-    ["ip", "-4", "rule", "show"],
-    "Failed to verify the local ingress route preference",
-  );
-  if (!hasDesiredLocalRouteRule(activeRules, routedSubnet)) {
+    const activeRules = await execute(
+      ["ip", "-4", "rule", "show"],
+      "Failed to verify the local ingress route preference",
+    );
+    if (!hasDesiredLocalRouteRule(activeRules, routedSubnet)) {
+      throw new Error(
+        `Local ingress route preference ${LOCAL_INGRESS_ROUTE_PRIORITY} was not active after service installation`,
+      );
+    }
+    assertLegacyLocalRouteSafe(activeRules, routedSubnet);
+    if (hasLegacyLocalRouteRule(activeRules, routedSubnet)) {
+      const legacyRule =
+        `pref ${LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY} to ${routedSubnet} lookup main`;
+      await execute(
+        [
+          "sudo",
+          "sh",
+          "-c",
+          `while ip -4 rule del ${legacyRule} 2>/dev/null; do :; done`,
+        ],
+        `Failed to remove the verified legacy priority-${LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY} ingress rule`,
+      );
+    }
+  } catch (error) {
+    if (!oldStateDisturbed || !existingUnit || !previousSubnet) throw error;
+
+    try {
+      // Stop whichever unit systemd currently has loaded so a failed new rule
+      // cannot conflict with the restored old unit.
+      await execute(
+        ["sudo", "systemctl", "stop", LOCAL_INGRESS_ROUTE_SERVICE],
+        `Failed to stop ${LOCAL_INGRESS_ROUTE_SERVICE} during rollback`,
+      );
+      await installUnit(existingUnit);
+      await execute(
+        ["sudo", "systemctl", "daemon-reload"],
+        `Failed to reload systemd while restoring ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+      );
+      await execute(
+        [
+          "sudo",
+          "systemctl",
+          previousServiceState?.enabled ? "enable" : "disable",
+          LOCAL_INGRESS_ROUTE_SERVICE,
+        ],
+        `Failed to restore the enabled state of ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+      );
+      if (previousServiceState?.active) {
+        await execute(
+          ["sudo", "systemctl", "start", LOCAL_INGRESS_ROUTE_SERVICE],
+          `Failed to restart restored ${LOCAL_INGRESS_ROUTE_SERVICE}`,
+        );
+      }
+      if (previousRuleWasActive) {
+        const restoredRules = await execute(
+          ["ip", "-4", "rule", "show"],
+          "Failed to verify the restored local ingress route preference",
+        );
+        if (!hasDesiredLocalRouteRule(restoredRules, previousSubnet)) {
+          throw new Error(
+            `Restored local ingress route preference ${LOCAL_INGRESS_ROUTE_PRIORITY} is not active for ${previousSubnet}`,
+          );
+        }
+      }
+    } catch (rollbackError) {
+      throw new Error(
+        `${(error as Error).message}. Rollback also failed: ${(rollbackError as Error).message}`,
+        { cause: error },
+      );
+    }
     throw new Error(
-      `Local ingress route preference ${LOCAL_INGRESS_ROUTE_PRIORITY} was not active after service installation`,
-    );
-  }
-  assertLegacyLocalRouteSafe(activeRules, routedSubnet);
-  if (hasLegacyLocalRouteRule(activeRules, routedSubnet)) {
-    const legacyRule =
-      `pref ${LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY} to ${routedSubnet} lookup main`;
-    await execute(
-      [
-        "sudo",
-        "sh",
-        "-c",
-        `while ip -4 rule del ${legacyRule} 2>/dev/null; do :; done`,
-      ],
-      `Failed to remove the verified legacy priority-${LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY} ingress rule`,
+      `${(error as Error).message}. The previous unit and route for ${previousSubnet} were restored.`,
+      { cause: error },
     );
   }
 }

@@ -192,6 +192,8 @@ export async function reconcileSplitDns(params: {
 export interface SplitDnsPrerequisites {
   servicesHealthy: boolean;
   unhealthyDetails?: string;
+  localIngressRouteReady: boolean;
+  localIngressRouteDetails?: string;
   routerFound: boolean;
   routerIsEphemeral?: boolean;
   routerTagMatched: boolean;
@@ -220,6 +222,13 @@ export function assertSplitDnsPrerequisites(params: SplitDnsPrerequisites): void
     throw new Error(
       `Cannot publish split DNS: CoreDNS or Traefik services are not healthy (${params.unhealthyDetails || "unhealthy service state"}). ` +
         "Existing split DNS configuration was preserved.",
+    );
+  }
+
+  if (!params.localIngressRouteReady) {
+    throw new Error(
+      `Cannot publish split DNS: local ingress route readiness failed (${params.localIngressRouteDetails || "route inspection did not select the managed Docker ingress bridge"}). ` +
+        "Existing split DNS configuration was preserved. Inspect the main-table connected route and effective routes to TS_DNS_SERVER and TRAEFIK_IP.",
     );
   }
 

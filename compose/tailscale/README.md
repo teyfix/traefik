@@ -296,17 +296,32 @@ old rule. Unexpected qualifiers on either scoped rule fail closed.
 To roll this behavior back after the host no longer owns that ingress subnet:
 
 ```bash
-sudo systemctl disable --now traefik-ingress-route.service
 ingress_subnet=10.128.0.0/24 # replace with this installation's TS_INGRESS_SUBNET
+unit_path=/etc/systemd/system/traefik-ingress-route.service
+
+# Fail closed before stopping or removing anything. This accepts only a unit
+# rendered by this repository (including the exact a6df8e4 prior version) for
+# the expected subnet.
+UNIT_PATH="$unit_path" EXPECTED_SUBNET="$ingress_subnet" bun -e '
+  import { managedLocalIngressRouteUnitSubnet } from "./scripts/onboarding/host.ts";
+  const content = await Bun.file(process.env.UNIT_PATH!).text();
+  if (managedLocalIngressRouteUnitSubnet(content) !== process.env.EXPECTED_SUBNET) {
+    throw new Error(`Refusing rollback: unrecognized or mismatched unit ${process.env.UNIT_PATH}`);
+  }
+'
+
+sudo systemctl disable --now traefik-ingress-route.service
 sudo ip -4 rule del pref 2500 to "$ingress_subnet" lookup main 2>/dev/null || true
-sudo rm /etc/systemd/system/traefik-ingress-route.service
+sudo rm "$unit_path"
 sudo systemctl daemon-reload
 ```
 
 Stopping the managed unit normally removes its scoped rule; the exact deletion
 also handles an already-inactive unit. These commands do not remove any other
-policy rule or disable Tailscale route acceptance. If the unit file does not
-match the generated unit documented here, inspect it instead of removing it.
+policy rule or disable Tailscale route acceptance. The ownership check runs
+before `disable --now`, rule deletion, or file removal. An absent, unreadable,
+modified, or unrelated same-named unit stops the procedure without mutation;
+inspect it instead of removing it.
 
 ## Normal Traefik exposure
 

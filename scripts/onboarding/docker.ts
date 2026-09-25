@@ -6,6 +6,7 @@ export interface DockerNetworkInfo {
   id: string;
   driver: string;
   subnets: string[];
+  bridgeName?: string;
   containers?: string[];
   labels?: Record<string, string>;
 }
@@ -94,6 +95,11 @@ export async function inspectDockerNetworks(): Promise<DockerNetworkInfo[]> {
         id: item.Id,
         driver: item.Driver,
         subnets,
+        bridgeName:
+          item.Options?.["com.docker.network.bridge.name"] ||
+          (item.Driver === "bridge" && /^[0-9a-f]{12,}$/i.test(item.Id)
+            ? `br-${item.Id.slice(0, 12)}`
+            : undefined),
         containers: item.Containers ? Object.keys(item.Containers) : [],
         labels: item.Labels || {},
       };

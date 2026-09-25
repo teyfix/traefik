@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, statSync } from "node:fs";
-import { mkdtemp, rm, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -36,12 +36,16 @@ import {
   ensureLocalIngressRoutePreference,
   LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY,
   LOCAL_INGRESS_ROUTE_PRIORITY,
+  managedLocalIngressRouteUnitSubnet,
   renderLocalIngressRouteService,
 } from "./host";
 import { DEFAULT_SERVICE_HEALTH_TIMEOUT_MS } from "./traefik";
 import { getTraefikServicesStatus, startTraefikStack } from "./traefik";
 import { exportCertsFromContainer } from "./certificates";
-import { DEFAULT_ROUTE_READINESS_TIMEOUT_MS } from "./verify";
+import {
+  DEFAULT_ROUTE_READINESS_TIMEOUT_MS,
+  inspectLocalIngressRouteReadiness,
+} from "./verify";
 import {
   assertRouterIdentityPreflight,
   assertSplitDnsPrerequisites,
@@ -620,6 +624,7 @@ describe("Host & DNS Zone derivation", () => {
       let ipRuleRead = 0;
       await ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
         unitPath,
+        getServiceState: async () => ({ enabled: true, active: true }),
         runCommand: async (command) => {
           commands.push(command);
           if (command[0] !== "ip") return "";
@@ -678,6 +683,184 @@ describe("Host & DNS Zone derivation", () => {
       expect(enableIndex).toBeGreaterThan(-1);
       expect(verifyIndex).toBeGreaterThan(enableIndex);
       expect(cleanupIndex).toBeGreaterThan(verifyIndex);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("adopts the exact a6df8e4 unit and active rule without a delete/add gap", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-adoption-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    const subnet = "10.128.0.0/24";
+    const previousUnit = renderLocalIngressRouteService(subnet).replace(
+      "# Managed by Traefik onboarding; validate ownership before removal.\n",
+      "",
+    );
+    const commands: string[][] = [];
+    try {
+      await Bun.write(unitPath, previousUnit);
+      await ensureLocalIngressRoutePreference(subnet, false, {
+        unitPath,
+        getServiceState: async () => {
+          throw new Error("same-subnet adoption must not inspect state for a stop");
+        },
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command[0] === "ip") {
+            return `2500: from all to ${subnet} lookup main suppress_prefixlength 0\n`;
+          }
+          return "";
+        },
+      });
+
+      expect(managedLocalIngressRouteUnitSubnet(previousUnit)).toBe(subnet);
+      expect(commands.some((command) => command.includes("stop"))).toBe(false);
+      expect(commands.some((command) => command.join(" ").includes("ip -4 rule del"))).toBe(false);
+      expect(commands.some((command) => command.includes("install"))).toBe(true);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["install", "daemon-reload", "enable", "verification"])(
+    "restores the previous unit, rule, and service state after %s failure",
+    async (failureStage) => {
+      const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-rollback-"));
+      const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+      const oldSubnet = "10.10.10.0/24";
+      const newSubnet = "10.128.0.0/24";
+      const oldUnit = renderLocalIngressRouteService(oldSubnet);
+      let currentRule = oldSubnet;
+      let injected = false;
+      try {
+        await Bun.write(unitPath, oldUnit);
+        await expect(ensureLocalIngressRoutePreference(newSubnet, false, {
+          unitPath,
+          getServiceState: async () => ({ enabled: true, active: true }),
+          runCommand: async (command) => {
+            const joined = command.join(" ");
+            if (command[0] === "ip") {
+              if (failureStage === "verification" && !injected && currentRule === newSubnet) {
+                injected = true;
+                return "";
+              }
+              return currentRule
+                ? `2500: from all to ${currentRule} lookup main suppress_prefixlength 0\n`
+                : "";
+            }
+            if (joined.includes("systemctl stop")) currentRule = "";
+            if (command.includes("install")) {
+              if (failureStage === "install" && !injected) {
+                injected = true;
+                throw new Error("injected install failure");
+              }
+              await Bun.write(unitPath, await readFile(command[4]!, "utf-8"));
+            }
+            if (joined.includes("daemon-reload") && failureStage === "daemon-reload" && !injected) {
+              injected = true;
+              throw new Error("injected daemon-reload failure");
+            }
+            if (joined.includes("enable --now")) {
+              if (failureStage === "enable" && !injected) {
+                injected = true;
+                throw new Error("injected enable failure");
+              }
+              currentRule = managedLocalIngressRouteUnitSubnet(await readFile(unitPath, "utf-8")) || "";
+            }
+            if (joined.includes("systemctl start")) {
+              currentRule = managedLocalIngressRouteUnitSubnet(await readFile(unitPath, "utf-8")) || "";
+            }
+            return "";
+          },
+        })).rejects.toThrow(/previous unit and route.*were restored/);
+
+        expect(await readFile(unitPath, "utf-8")).toBe(oldUnit);
+        expect(currentRule).toBe(oldSubnet);
+      } finally {
+        await rm(tempDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("restores a previously disabled and inactive unit without activating it", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-inactive-rollback-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    const oldUnit = renderLocalIngressRouteService("10.10.10.0/24");
+    const commands: string[][] = [];
+    try {
+      await Bun.write(unitPath, oldUnit);
+      await expect(ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
+        unitPath,
+        getServiceState: async () => ({ enabled: false, active: false }),
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command[0] === "ip") return "";
+          if (command.includes("install")) {
+            await Bun.write(unitPath, await readFile(command[4]!, "utf-8"));
+          }
+          if (command.join(" ").includes("enable --now")) {
+            throw new Error("injected enable failure");
+          }
+          return "";
+        },
+      })).rejects.toThrow(/previous unit and route.*were restored/);
+
+      expect(await readFile(unitPath, "utf-8")).toBe(oldUnit);
+      expect(commands.some((command) => command.join(" ").includes("systemctl disable"))).toBe(true);
+      expect(commands.some((command) => command.join(" ").includes("systemctl start"))).toBe(false);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("fails before mutation when an inactive old unit has a manual exact rule", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-ambiguous-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    const commands: string[][] = [];
+    try {
+      await Bun.write(unitPath, renderLocalIngressRouteService("10.10.10.0/24"));
+      await expect(ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
+        unitPath,
+        getServiceState: async () => ({ enabled: false, active: false }),
+        runCommand: async (command) => {
+          commands.push(command);
+          return command[0] === "ip"
+            ? "2500: from all to 10.10.10.0/24 lookup main suppress_prefixlength 0\n"
+            : "";
+        },
+      })).rejects.toThrow(/ambiguous state/);
+      expect(commands).toEqual([["ip", "-4", "rule", "show"]]);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("does not attempt replacement or rollback after the initial old-unit stop fails", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-stop-failure-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    const oldUnit = renderLocalIngressRouteService("10.10.10.0/24");
+    const commands: string[][] = [];
+    try {
+      await Bun.write(unitPath, oldUnit);
+      await expect(ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
+        unitPath,
+        getServiceState: async () => ({ enabled: true, active: true }),
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command[0] === "ip") {
+            return "2500: from all to 10.10.10.0/24 lookup main suppress_prefixlength 0\n";
+          }
+          if (command.join(" ").includes("systemctl stop")) {
+            throw new Error("injected stop failure");
+          }
+          return "";
+        },
+      })).rejects.toThrow("injected stop failure");
+      expect(await readFile(unitPath, "utf-8")).toBe(oldUnit);
+      expect(commands).toEqual([
+        ["ip", "-4", "rule", "show"],
+        ["sudo", "systemctl", "stop", "traefik-ingress-route.service"],
+      ]);
     } finally {
       await rm(tempDirectory, { recursive: true, force: true });
     }
@@ -1668,9 +1851,90 @@ describe("Docker & state discovery semantics", () => {
   });
 });
 
+describe("Local ingress route readiness", () => {
+  const network = {
+    name: "traefik_ingress",
+    id: "1234567890abcdef1234567890abcdef",
+    driver: "bridge",
+    subnets: ["10.128.64.0/24"],
+    labels: {
+      "com.docker.compose.project": "traefik",
+      "com.docker.compose.network": "ingress",
+    },
+  };
+  const bridge = "br-1234567890ab";
+
+  test("requires the exact main-table route and effective bridge/source for both endpoints", async () => {
+    const result = await inspectLocalIngressRouteReadiness({
+      routedSubnet: "10.128.64.0/24",
+      dnsResolverIp: "10.128.64.10",
+      traefikIp: "10.128.64.2",
+      networks: [network],
+      runCommand: async (command) => command.includes("show")
+        ? JSON.stringify([{
+          dst: "10.128.64.0/24",
+          dev: bridge,
+          protocol: "kernel",
+          scope: "link",
+          prefsrc: "10.128.64.1",
+        }])
+        : JSON.stringify([{
+          dst: command.at(-1),
+          dev: bridge,
+          prefsrc: "10.128.64.1",
+        }]),
+    });
+    expect(result.ready).toBe(true);
+  });
+
+  test.each([
+    ["connected route on a different bridge", "connected", "br-deadbeef0000", "10.128.64.1"],
+    ["DNS route through tailscale", "10.128.64.10", "tailscale0", "100.64.0.1"],
+    ["Traefik route with an outside source", "10.128.64.2", bridge, "192.168.1.2"],
+  ])("fails closed for %s", async (_label, failingTarget, dev, source) => {
+    const result = await inspectLocalIngressRouteReadiness({
+      routedSubnet: "10.128.64.0/24",
+      dnsResolverIp: "10.128.64.10",
+      traefikIp: "10.128.64.2",
+      networks: [network],
+      runCommand: async (command) => {
+        if (command.includes("show")) {
+          return JSON.stringify([{
+            dst: "10.128.64.0/24",
+            dev: failingTarget === "connected" ? dev : bridge,
+            protocol: "kernel",
+            scope: "link",
+            prefsrc: "10.128.64.1",
+          }]);
+        }
+        const destination = command.at(-1);
+        return JSON.stringify([{
+          dst: destination,
+          dev: destination === failingTarget ? dev : bridge,
+          prefsrc: destination === failingTarget ? source : "10.128.64.1",
+        }]);
+      },
+    });
+    expect(result.ready).toBe(false);
+  });
+
+  test("rejects a same-named bridge without exact Compose ownership labels", async () => {
+    const result = await inspectLocalIngressRouteReadiness({
+      routedSubnet: "10.128.64.0/24",
+      dnsResolverIp: "10.128.64.10",
+      traefikIp: "10.128.64.2",
+      networks: [{ ...network, labels: {} }],
+      runCommand: async () => { throw new Error("route commands must not run"); },
+    });
+    expect(result.ready).toBe(false);
+    expect(result.details).toContain("Compose-owned");
+  });
+});
+
 describe("Split DNS prerequisites and gating", () => {
   const basePrereqs: SplitDnsPrerequisites = {
     servicesHealthy: true,
+    localIngressRouteReady: true,
     routerFound: true,
     routerIsEphemeral: true,
     routerTagMatched: true,
@@ -1692,6 +1956,35 @@ describe("Split DNS prerequisites and gating", () => {
         unhealthyDetails: "CoreDNS unhealthy",
       }),
     ).toThrow(/CoreDNS or Traefik services are not healthy/);
+  });
+
+  test.each([
+    "main table lacks the exact connected ingress route",
+    "effective DNS route selected tailscale0",
+    "effective Traefik route source is outside ingress /24",
+  ])("proves route failure prevents a split DNS write: %s", async (failureDetails) => {
+    let updateSplitDnsCalled = false;
+    const mockApiClient: any = {
+      updateSplitDns: async () => { updateSplitDnsCalled = true; },
+    };
+    try {
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        localIngressRouteReady: false,
+        localIngressRouteDetails: failureDetails,
+      });
+      await reconcileSplitDns({
+        client: mockApiClient,
+        currentSplitDns: {},
+        dnsZone: "example.ts.net",
+        dnsResolverIp: "10.128.64.10",
+        forceReplace: false,
+      });
+    } catch (error) {
+      expect((error as Error).message).toContain("local ingress route readiness failed");
+      expect((error as Error).message).toContain(failureDetails);
+    }
+    expect(updateSplitDnsCalled).toBe(false);
   });
 
   test("assertSplitDnsPrerequisites throws when router device is not found on tailnet", () => {

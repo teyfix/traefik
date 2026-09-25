@@ -1,4 +1,9 @@
-import { isDockerDaemonReachable, inspectDockerNetworks } from "./docker";
+import {
+  isDockerDaemonReachable,
+  inspectDockerNetworks,
+  type DockerNetworkInfo,
+} from "./docker";
+import { isIpInCidr } from "./network";
 import { testDnsResolution } from "./dns";
 import { isRootCaTrusted } from "./certificates";
 import { getTraefikServicesStatus } from "./traefik";
@@ -13,6 +18,108 @@ export interface VerificationResult {
 }
 
 export const DEFAULT_ROUTE_READINESS_TIMEOUT_MS = 120_000;
+
+export interface LocalIngressRouteReadiness {
+  ready: boolean;
+  details: string;
+}
+
+async function runIpJson(command: string[]): Promise<string> {
+  const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+  const [code, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  if (code !== 0) {
+    throw new Error(`${command.join(" ")} failed (exit code ${code}): ${stderr.trim()}`);
+  }
+  return stdout;
+}
+
+function parseRouteJson(output: string, context: string): any[] {
+  try {
+    const parsed = JSON.parse(output);
+    if (!Array.isArray(parsed)) throw new Error("result is not an array");
+    return parsed;
+  } catch (error) {
+    throw new Error(`Could not parse ${context}: ${(error as Error).message}`);
+  }
+}
+
+/** Proves local DNS/Traefik destinations use the exact owned ingress bridge. */
+export async function inspectLocalIngressRouteReadiness(params: {
+  routedSubnet: string;
+  dnsResolverIp: string;
+  traefikIp: string;
+  networks?: DockerNetworkInfo[];
+  runCommand?: (command: string[]) => Promise<string>;
+}): Promise<LocalIngressRouteReadiness> {
+  const networks = params.networks || await inspectDockerNetworks();
+  const ingress = networks.find((network) => network.name === "traefik_ingress");
+  const expectedLabels =
+    ingress?.labels?.["com.docker.compose.project"] === "traefik" &&
+    ingress?.labels?.["com.docker.compose.network"] === "ingress";
+  const validNetworkId = Boolean(ingress && /^[0-9a-f]{12,}$/i.test(ingress.id));
+  const bridgeName = ingress?.bridgeName ||
+    (ingress?.driver === "bridge" && validNetworkId
+      ? `br-${ingress.id.slice(0, 12)}`
+      : undefined);
+
+  if (
+    !ingress || !validNetworkId || ingress.driver !== "bridge" || !expectedLabels ||
+    ingress.subnets.length !== 1 || ingress.subnets[0] !== params.routedSubnet || !bridgeName
+  ) {
+    return {
+      ready: false,
+      details:
+        `Docker network 'traefik_ingress' must be the inspected Compose-owned bridge for exact subnet ${params.routedSubnet}; ` +
+        "verify its ID, driver, subnet, and com.docker.compose project/network labels",
+    };
+  }
+
+  const execute = params.runCommand || runIpJson;
+  try {
+    const connectedRoutes = parseRouteJson(
+      await execute(["ip", "-j", "route", "show", "table", "main", "exact", params.routedSubnet]),
+      `main-table route for ${params.routedSubnet}`,
+    );
+    const exactConnected = connectedRoutes.some((route) =>
+      route.dst === params.routedSubnet && route.dev === bridgeName &&
+      route.protocol === "kernel" && route.scope === "link",
+    );
+    if (!exactConnected) {
+      return {
+        ready: false,
+        details: `Main table lacks the exact connected ${params.routedSubnet} route on inspected bridge ${bridgeName}`,
+      };
+    }
+
+    for (const destination of [params.dnsResolverIp, params.traefikIp]) {
+      const effectiveRoutes = parseRouteJson(
+        await execute(["ip", "-j", "route", "get", destination]),
+        `effective route to ${destination}`,
+      );
+      const selected = effectiveRoutes[0];
+      const source = selected?.prefsrc || selected?.src;
+      if (selected?.dev !== bridgeName || !source || !isIpInCidr(source, params.routedSubnet)) {
+        return {
+          ready: false,
+          details:
+            `Effective route to ${destination} must select inspected bridge ${bridgeName} with a source inside ${params.routedSubnet}; ` +
+            `got dev=${selected?.dev || "missing"}, source=${source || "missing"}`,
+        };
+      }
+    }
+  } catch (error) {
+    return { ready: false, details: (error as Error).message };
+  }
+
+  return {
+    ready: true,
+    details: `Main-table and effective routes select inspected bridge ${bridgeName} for both ingress endpoints`,
+  };
+}
 
 export function verifyDeviceRoutes(
   routerDev: { advertisedRoutes?: string[]; enabledRoutes?: string[] },
