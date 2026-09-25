@@ -73,51 +73,99 @@ cd traefik
 
 Make sure you're inside the cloned folder before running any of the next steps.
 
-### 2. Configure Tailscale
+### 2. Run the Onboarding CLI
 
-First complete the [onboarding questionnaire](compose/tailscale/ONBOARDING.md)
-with the current Tailnet administrator. Existing DNS zones, route owners, and
-the target machine's subnets determine the setup. Do not copy these values to
-another host until that conflict check is complete.
+Run the idempotent onboarding CLI to automatically inspect your host and tailnet, discover a unique non-conflicting 10.* /24 Docker ingress subnet, configure Tailscale policy, register split DNS, provision the router auth key, and verify Step CA certificates:
 
-Copy the example environment and replace its placeholders with the approved
-non-secret network values and first-registration auth key for this installation:
+```bash
+# Interactive mode
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts
+
+# Non-interactive automatic mode
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --ingress-subnet auto --ts-dns-zone auto --yes
+
+# Dry run (plan mutations without applying changes)
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --dry-run
+```
+
+`TS_API_TOKEN` is onboarding-only, transient, and never written. The CLI creates
+a preauthorized, tagged, reusable, ephemeral `TS_AUTHKEY` with the maximum
+90-day expiry and stores it atomically in gitignored
+`env/.env.tailscale.local` with mode `0600`. Compose reads that file directly;
+root `.env` and a root `.env.tailscale.local` used for operator testing are not
+production key storage. The persistent `traefik_tailscale` volume is preserved
+across ordinary restarts. Renew the key before expiry with
+`TS_API_TOKEN="..." bun scripts/onboarding.ts --rotate-authkey`; keys cannot be
+extended beyond 90 days, so this creates a replacement rather than making the
+installation indefinitely unattended.
+
+The connector forces authentication on each start. Ordinary restarts retain
+the same device through the persistent volume; after the normal 30–60 minute
+offline ephemeral eviction window, the stored reusable key creates a new device
+under the stable `TS_HOSTNAME`. The device ID and Tailscale IP may change.
+Verify recovery by the Tailnet API device and enabled-route result, not local
+`Running` status.
+
+### 3. Manual Configuration (Alternative)
+
+If preferred, you can complete the [onboarding questionnaire](compose/tailscale/ONBOARDING.md)
+with the current Tailnet administrator and configure `.env` manually:
 
 ```bash
 cp .example.env .env
 $EDITOR .env
 ```
 
-Complete the one-time tailnet policy, route-approval, DNS, and auth-key setup in
-[`compose/tailscale/README.md`](compose/tailscale/README.md). Put `TS_AUTHKEY`
-only in the documented gitignored local environment file; never commit it.
+Complete the tailnet policy, route-approval, DNS, and reusable ephemeral key
+setup in [`compose/tailscale/README.md`](compose/tailscale/README.md). Store the
+key only in `env/.env.tailscale.local` with mode `0600`, never in `.env`.
 
 ### Existing checkout migration
 
-This repository used to track root `.env`. The migration that introduces
-`.example.env` removes `.env` from Git, so an existing checkout can lose an
-unmodified local `.env` when pulling the change. Preserve it before updating:
+When upgrading an existing checkout to the ingress-only architecture:
 
-```bash
-mkdir -p .local
-cp --backup=numbered .env .local/.env.before-example-env-migration
-```
+1. **Clean up legacy networks and containers**: If upgrading a host with active containers on the legacy `tailscale_services` network, remove task-owned containers directly by exact name, tolerating containers that are already absent, and then remove the legacy network:
+   ```bash
+   docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm tailscale_services
+   ```
+   If recreating an existing `traefik_ingress` network:
+   ```bash
+   docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm traefik_ingress
+   ```
+   Direct `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`. These commands remove only the named legacy or conflicting network; they preserve named volumes and unrelated networks such as `traefik_proxy`.
 
-GNU `cp --backup=numbered` preserves any backup already at that path as a
-numbered sibling before writing the current `.env`.
+2. **Migrate network ownership labels safely**: The CLI detects matching
+   `traefik_ingress` or `traefik_proxy` networks created by older direct Docker
+   commands. It removes only inactive unlabeled networks so Compose can recreate
+   them with ownership labels. If either has attachments, it stops with targeted
+   inspection/migration instructions; it does not delete backend containers,
+   volumes, or an active proxy network.
 
-After updating, restore the file if Git removed it:
+3. **Migrate credentials**: The CLI removes legacy `TS_AUTHKEY` and
+   `TS_API_TOKEN` values from root `.env`, then atomically creates or sanitizes
+   `env/.env.tailscale.local`. It never stores the API token.
 
-```bash
-test -f .env || cp .local/.env.before-example-env-migration .env
-docker compose config --quiet
-```
+   The current `teyfix-router` identity is confirmed ephemeral. The CLI still
+   requires the Tailnet API to explicitly report `isEphemeral: true` before
+   accepting the router or publishing split DNS; false or missing status stops
+   a normal run while preserving existing split DNS, and is reported as a
+   nonfatal prerequisite by `--dry-run`. Do not reset router state during an
+   ordinary migration. The
+   [operator guide](compose/tailscale/README.md#existing-teyfix-router-identity)
+   records the identity guard and contingency procedure.
 
-Keep the restored `.env` local and ignored. If `TS_AUTHKEY` was stored in the
-legacy `env/.env.tailscale.local` file, either leave that file in place for
-compatibility or move the `TS_AUTHKEY` line into root `.env`. The persistent
-Tailscale state volume normally means the key is needed only for first
-registration or after deliberately deleting connector state.
+4. **Preserve local `.env`**: If migrating from very old checkouts that tracked root `.env`:
+   ```bash
+   mkdir -p .local
+   cp --backup=numbered .env .local/.env.before-example-env-migration
+   ```
+   After updating, restore if Git removed it:
+   ```bash
+   test -f .env || cp .local/.env.before-example-env-migration .env
+   docker compose config --quiet
+   ```
 
 ### 3. Render and start the environment
 
@@ -181,17 +229,17 @@ Then follow these steps to install the certificate:
 
 ### 6. Attach an application project
 
-For the normal HTTPS path, attach a service to `traefik_proxy` and keep its
+Attach application services exclusively to `traefik_proxy` and declare standard
 project-owned Traefik labels. A host such as
-`api.project.dev.example.test` resolves to Traefik, which then selects the
-project router.
+`api.project.dev.example.test` resolves to Traefik's static IP (`TRAEFIK_IP`) on
+the routed `traefik_ingress` network, and Traefik forwards traffic to the backend
+on `traefik_proxy`.
 
-Direct container access is opt-in and uses an exact alias such as
-`hello.project.dkr.dev.example.test` on the external `tailscale_services`
-network. It
-bypasses Traefik security and TLS. See the
-[`tailscale-direct` recipe](recipes/tailscale-direct/README.md) before using
-that path.
+Under the ingress-only architecture, application backends remain isolated on the
+private, unadvertised `traefik_proxy` network. Direct container exposure, direct
+DNS zones, and direct routes (such as `tailscale_services` or `DIRECT_DOMAIN`)
+are eliminated; all traffic enters through Traefik for centralized TLS termination,
+routing, and access control.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
@@ -336,42 +384,41 @@ https://localhost:9000
 
 ## 🌐 Network Architecture
 
-This stack exposes application services through two distinct paths:
+This stack exposes application services through a single ingress-only path:
 
-- Ordinary names such as `api.project.dev.example.test` resolve through
-  CoreDNS at the configured `TS_DNS_SERVER` to Traefik's Docker address. The
-  project service only needs the `traefik_proxy` network and its own labels.
-- Direct names such as `hello.project.dkr.dev.example.test` resolve through
-  Docker embedded DNS to the exact alias of a container explicitly joined to
-  `tailscale_services`.
-
-Tailscale routes the returned IP, not the hostname. CoreDNS selects the
-destination address class. The subnet router advertises the configured service
-subnet for CoreDNS/direct containers and the approved Docker/Traefik route.
+- Hostnames such as `api.project.dev.example.test` resolve through CoreDNS
+  at the configured `TS_DNS_SERVER` to Traefik's static ingress address
+  (`TRAEFIK_IP`) on `traefik_ingress`.
+- The Tailscale subnet router advertises solely the dedicated, explicit
+  ingress /24 subnet (`TS_INGRESS_SUBNET`) containing Tailscale, CoreDNS, and
+  Traefik.
+- Backend services attach exclusively to the private, unadvertised
+  `traefik_proxy` network. Traefik bridges incoming traffic from `traefik_ingress`
+  to backends on `traefik_proxy`. Direct container routes and direct-container DNS
+  (`DIRECT_DOMAIN`) are eliminated.
 
 Traefik publishes ports `80`, `443`, `8080`, and `4040` only on
 `127.0.0.1`. Host-local clients can still use those published ports, while
 ordinary LAN clients cannot reach them through a host interface. Tailnet
-clients instead reach Traefik's Docker address through the approved
-subnet route. This boundary depends on restrictive Tailscale grants:
+clients instead reach Traefik's static IP through the approved
+ingress route. This boundary depends on restrictive Tailscale grants:
 private DNS names are service discovery, not authorization.
 
-Certificate validation additionally uses this configuration:
+Certificate validation uses this configuration:
 
 - **Step CA** runs in `network_mode: host` to use the host's tailnet split DNS
   and advertised routes during ACME challenges
 - **Traefik** connects to Step CA via `host.docker.internal:9000` for
   certificate requests
-- **Services** run on the `traefik_proxy` bridge network for proper service
-  discovery
+- **Services** run on the private `traefik_proxy` bridge network for proper
+  service discovery
 
 > [!IMPORTANT]  
 > Step CA must use host networking so ACME validation follows the same tailnet
 > DNS and routed Docker path as clients.
 
-The complete tailnet policy, split-DNS, route, ownership, direct-container, and
-migration contract is documented in
-[`compose/tailscale/README.md`](compose/tailscale/README.md).
+The complete tailnet policy, split-DNS, route, ownership, and migration contract
+is documented in [`compose/tailscale/README.md`](compose/tailscale/README.md).
 
 ---
 
@@ -384,8 +431,10 @@ migration contract is documented in
   routed Docker address and must be restricted with Tailscale grants
 - Private DNS records do not authorize access or replace application
   authentication for sensitive services
-- Direct exposure bypasses Traefik TLS, middleware, and auth
-- Broad Docker routing can overlap client LAN, VPN, or Docker networks
+- All ingress traffic passes through Traefik; direct container bypass routes
+  and direct DNS zones are eliminated
+- Using a single dedicated ingress /24 avoids broad Docker subnet routing and
+  prevents CIDR collisions with client LAN, VPN, or Docker networks
 - Tailnet split DNS shadows public records under the same suffix
 
 Using an owned suffix provides stable OAuth callback names, but providers such

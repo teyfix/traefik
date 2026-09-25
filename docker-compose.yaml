@@ -9,9 +9,9 @@ networks:
   proxy:
     name: traefik_proxy
     driver: bridge
-  tailscale:
-    name: tailscale_services
+  ingress:
+    name: traefik_ingress
     driver: bridge
     ipam:
       config:
-        - subnet: ${TS_SERVICE_SUBNET:?}
+        - subnet: ${TS_INGRESS_SUBNET:-${TS_SERVICE_SUBNET:?}}

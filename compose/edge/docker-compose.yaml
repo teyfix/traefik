@@ -68,6 +68,8 @@ services:
       proxy:
         aliases:
           - traefik.docker.local
+      ingress:
+        ipv4_address: ${TRAEFIK_IP:?}
     ports:
       # HTTP web entrypoint for dashboards, web apps, etc.
       - "127.0.0.1:80:80"

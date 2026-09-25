@@ -30,32 +30,23 @@ existing Tailnet for every contributor.
 |Target|Machine identity and whether this is access to existing services or operation of independent ingress.|
 |Names|Requested suffix, existing shared endpoints, and the split-DNS mapping already configured or authorized.|
 |Networks|Exact allocated CIDRs and reserved DNS/router/ingress IPs, with enough existing route information to check overlaps.|
-|Access|Assigned tag/auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat.|
+|Access|Transient TS_API_TOKEN or reusable ephemeral auth-key delivery location, key expiry/renewal owner, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat or store it outside the documented ignored credential file.|
 
-The configuration must distinguish the following designs:
+The ingress configuration uses the following ingress-only architecture:
 
 |Design|What the onboarding agent can assume|
-|-|-|
-|Current repository|`tailscale_services` has explicit `TS_SERVICE_SUBNET`; `traefik_proxy` is auto-allocated separately. CoreDNS returns the proxy-network Traefik address for ordinary names.|
-|Proposed single-subnet ingress|DNS and a private ingress proxy share one allocated host subnet, which is the advertised route. This is a design proposal, not implemented here by changing environment values.|
+|---|---|
+|Ingress-only design|`traefik_ingress` has an explicit `10.* /24` `TS_INGRESS_SUBNET` containing Tailscale, CoreDNS (`TS_DNS_SERVER`), and Traefik (`TRAEFIK_IP`). Only this ingress `/24` is advertised to Tailscale. Backend applications live on the isolated, unadvertised `traefik_proxy` network.|
 
-The intended predictable allocation is one exposed subnet per host where that
-design is implemented. An example such as `10.20.20.0/24` with DNS at
-`10.20.20.20` is not a reservation. This repository does not currently expose
-`TS_PROXY_SERVER` or `TS_ROUTER_IP` configuration inputs. If the selected setup
-needs that design, report the infrastructure gap and obtain its own scoped
-implementation; do not invent unsupported environment variables or change
-CoreDNS templates during onboarding. Application work using existing shared
-services can proceed independently.
+The allocation is one unique explicit `10.*` Docker ingress `/24` per host,
+discovered by scanning claimed routes across all tailnet devices (both online and offline)
+and local host routes. An existing ingress subnet is preserved only when ownership
+is unambiguous.
 
-For the current design, inspect the actual proxy network and required routes.
-Do not copy its broad `172.16.0.0/12` advertisement to another host. Docker
-allocates default networks locally, so identical default `bridge` subnets on
-different hosts do not alone prove a conflict. Compare the subnets actually
-advertised and the effective routes on clients. Explicit Compose IPAM controls
-a selected network; daemon `default-address-pools` controls future automatic
-networks, and `bip` controls the default bridge. None is an instruction to
-renumber or recreate existing networks during onboarding.
+Application workloads attach exclusively to `traefik_proxy` and declare their
+`traefik.http.routers.*` labels. Direct-container DNS (`DIRECT_DOMAIN`) and routing
+into private Docker backend subnets are eliminated, avoiding global Docker daemon
+address pool mutations and subnet conflicts across tailnet peers.
 
 If the current policy auto-approves routes within `0.0.0.0/0` and `::/0` for
 `tag:docker`, a device authenticated with that tag can have its advertised
@@ -97,9 +88,13 @@ subnet router. Follow that application's own guide for development tooling.
 Keep shared ingress, DNS and any other existing service endpoints under their
 existing owners and at their actual names. A personal application suffix
 does not rename those services. Use the developer's own credentials and
-authorized access. Keep real secrets in the documented ignored files; share
-placeholder examples and public CA certificates only. Do not copy another
-person's login files or create dummy credentials to pass setup.
+authorized access. `TS_API_TOKEN` is transient and provided only in the process
+environment. The tagged, preauthorized, reusable ephemeral `TS_AUTHKEY` is
+stored only in gitignored `env/.env.tailscale.local` with mode `0600`; its
+maximum lifetime is 90 days, so record an operator renewal owner/date. State is
+preserved in the persistent `traefik_tailscale` volume. Keep real secrets in the documented ignored files; share placeholder
+examples and public CA certificates only. Do not copy another person's login
+files or create dummy credentials to pass setup.
 
 ## Application contributor path
 
@@ -167,10 +162,25 @@ to start. Resolve missing inputs and obtain authorization for that concrete
 scope before applying it; reuse authorization already given for the same
 scope. Continue independent read-only work while blocked.
 
-Use `TAIL_DOMAIN` and `DIRECT_DOMAIN` for an authorized independent
-installation's zones. A personal suffix does not require changing
+Use `TAIL_DOMAIN` for an authorized independent installation's zone.
+Direct-container DNS (`DIRECT_DOMAIN`) and routing are eliminated under the
+ingress-only architecture. A personal suffix does not require changing
 `Corefile.gotpl`. Adding another zone to the shared resolver is a separately
 scoped implementation change. Preserve existing shared service endpoint names.
+
+When migrating an existing host with active legacy `tailscale_services` or
+`traefik_ingress` containers, remove only the task-owned containers by exact
+name, tolerating ones already absent, before removing the scoped network:
+`docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true`, then
+`docker network rm tailscale_services` (or for ingress:
+`docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true`,
+then `docker network rm traefik_ingress`).
+This avoids Compose failures on legacy `.env` files lacking `TRAEFIK_IP` and
+preserves shared application networks such as `traefik_proxy`.
+Matching-name `traefik_ingress` and `traefik_proxy` networks also require the
+Compose project/network labels. The CLI removes inactive unlabeled networks;
+if active, it fails with attachment-specific instructions. Never delete
+application containers or volumes to migrate an active proxy network.
 
 ## Verification from the actual client
 
@@ -181,6 +191,8 @@ After the authorized setup, verify each affected boundary:
    still resolve to their original destinations and remain usable.
 2. Effective routes select the intended router/network; no unrelated local,
    Docker, VPN, or existing Tailnet service was redirected.
+   For an ephemeral router restart, require the Tailnet API device/tag and
+   enabled route; local `BackendState=Running` alone is insufficient.
 3. HTTPS validates the expected hostname and CA in the developer's browser
    and IDE environment. Never use disabled TLS validation as acceptance.
 4. The selected application and any required client tools work from
