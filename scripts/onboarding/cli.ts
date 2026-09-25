@@ -29,6 +29,7 @@ import {
   ensureRouterAuthKey,
   reconcileSplitDns,
   findRouterDevice,
+  assertSplitDnsPrerequisites,
   type TailnetDiscovery,
 } from "./tailscale";
 import { parseEnv, mergeEnvFile, scrubLegacyEnvFile, redactSecret } from "./env";
@@ -206,7 +207,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
 
   const resolvedSubnetInput = await resolveOptionValue({
-    cliValue: cliOptions.ingressSubnet || cliOptions.dockerPool,
+    cliValue: cliOptions.ingressSubnet,
     defaultValue: recommendedAllocation.ingressSubnet,
     isYes: cliOptions.yes,
     promptFn: async (rec) => {
@@ -253,7 +254,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     if (hasContainers) {
       throw new Error(
         `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
-          "Stop running services ('docker compose down') before migrating to the new 'traefik_ingress' network.",
+          "Run 'docker compose stop tailscale coredns && docker compose rm -f tailscale coredns && docker network rm tailscale_services && docker compose up -d --force-recreate traefik tailscale coredns' to safely migrate without dropping shared networks (e.g. traefik_proxy).",
       );
     }
   }
@@ -264,7 +265,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     const hasContainers = Boolean(ingressNet.containers && ingressNet.containers.length > 0);
     if (hasContainers) {
       throw new Error(
-        `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. Stop running services ('docker compose down') before migrating to the new subnet.`,
+        `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. ` +
+          "Run 'docker compose stop tailscale coredns && docker compose rm -f tailscale coredns && docker network rm traefik_ingress && docker compose up -d --force-recreate traefik tailscale coredns' to migrate without dropping shared networks (e.g. traefik_proxy).",
       );
     }
     needsIngressRecreate = true;
@@ -503,12 +505,31 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       timeoutMs: 30000,
     });
     if (!routerStatus.deviceFound) {
-      actionSpinner.stop(
-        `Warning: Router device '${resolvedTsHostname}' not found yet on Tailnet. Split DNS will proceed with fallback.`,
-      );
+      actionSpinner.stop("Router device not found on Tailnet");
     } else {
       actionSpinner.stop("Tailscale router device and route approval verified");
     }
+
+    // Gate split DNS publication on healthy services AND confirmed approved route
+    const routesApproved =
+      routerStatus.routeResults.length > 0 && routerStatus.routeResults.every((r) => r.passed);
+    const unapprovedDetail = routerStatus.routeResults
+      .filter((r) => !r.passed)
+      .map((r) => r.message || r.step)
+      .join("; ");
+
+    assertSplitDnsPrerequisites({
+      servicesHealthy: health.healthy,
+      unhealthyDetails: health.healthy ? undefined : "Traefik or CoreDNS container failed healthcheck",
+      routerFound: routerStatus.deviceFound,
+      routerTagMatched: routerStatus.tagMatched,
+      routesApproved,
+      unapprovedRouteDetails: unapprovedDetail,
+      apiError: routerStatus.lastApiError,
+      tsHostname: resolvedTsHostname,
+      routerTag: resolvedTag,
+      routedSubnet,
+    });
 
     // 6.8 Tailscale Split DNS (published only AFTER ingress router & CoreDNS are confirmed up)
     actionSpinner.start(`Configuring Tailscale split DNS (${finalZone} -> ${dnsResolverIp})`);

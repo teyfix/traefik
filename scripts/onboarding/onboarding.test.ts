@@ -28,6 +28,11 @@ import {
   DnsZoneSchema,
 } from "./options";
 import { deriveDnsZoneFromHost } from "./host";
+import {
+  assertSplitDnsPrerequisites,
+  reconcileSplitDns,
+  type SplitDnsPrerequisites,
+} from "./tailscale";
 
 describe("Network & CIDR calculation", () => {
   test("parses CIDR correctly", () => {
@@ -1048,3 +1053,95 @@ describe("Docker & state discovery semantics", () => {
     }
   });
 });
+
+describe("Split DNS prerequisites and gating", () => {
+  const basePrereqs: SplitDnsPrerequisites = {
+    servicesHealthy: true,
+    routerFound: true,
+    routerTagMatched: true,
+    routesApproved: true,
+    tsHostname: "ts-docker-test",
+    routerTag: "tag:docker-router",
+    routedSubnet: "10.128.64.0/24",
+  };
+
+  test("assertSplitDnsPrerequisites passes when all conditions are met", () => {
+    expect(() => assertSplitDnsPrerequisites(basePrereqs)).not.toThrow();
+  });
+
+  test("assertSplitDnsPrerequisites throws when services are unhealthy and preserves existing split DNS", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        servicesHealthy: false,
+        unhealthyDetails: "CoreDNS unhealthy",
+      }),
+    ).toThrow(/CoreDNS or Traefik services are not healthy/);
+  });
+
+  test("assertSplitDnsPrerequisites throws when router device is not found on tailnet", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        routerFound: false,
+        apiError: new Error("Device offline or unregistered"),
+      }),
+    ).toThrow(/router device 'ts-docker-test' was not found on Tailnet/);
+  });
+
+  test("assertSplitDnsPrerequisites throws when router tag does not match", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        routerTagMatched: false,
+      }),
+    ).toThrow(/missing required tag 'tag:docker-router'/);
+  });
+
+  test("assertSplitDnsPrerequisites throws when ingress route is not approved in Tailscale ACL", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        routesApproved: false,
+        unapprovedRouteDetails: "Route 10.128.64.0/24 pending approval in tailnet admin console",
+      }),
+    ).toThrow(/Ingress route '10.128.64.0\/24' is not approved\/active/);
+  });
+
+  test("proves split DNS write is never called when prerequisites fail", async () => {
+    let updateSplitDnsCalled = false;
+    const mockApiClient: any = {
+      updateSplitDns: async () => {
+        updateSplitDnsCalled = true;
+      },
+    };
+
+    // Scenario: route unapproved
+    const prereqs: SplitDnsPrerequisites = {
+      ...basePrereqs,
+      routesApproved: false,
+      unapprovedRouteDetails: "Route pending approval",
+    };
+
+    let caughtError: Error | null = null;
+    try {
+      assertSplitDnsPrerequisites(prereqs);
+      // If assert doesn't throw, this would run:
+      await reconcileSplitDns({
+        client: mockApiClient,
+        currentSplitDns: {},
+        dnsZone: "example.ts.net",
+        dnsResolverIp: "10.128.64.10",
+        forceReplace: false,
+        dryRun: false,
+      });
+    } catch (err: any) {
+      caughtError = err;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.message).toContain("Ingress route '10.128.64.0/24' is not approved/active");
+    expect(updateSplitDnsCalled).toBe(false);
+  });
+});
+

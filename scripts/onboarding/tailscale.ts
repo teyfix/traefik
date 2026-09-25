@@ -166,3 +166,57 @@ export async function reconcileSplitDns(params: {
   return { applied: true, reason: `Updated split DNS for ${cleanZone} -> [${dnsResolverIp}]${replaceNote}` };
 }
 
+export interface SplitDnsPrerequisites {
+  servicesHealthy: boolean;
+  unhealthyDetails?: string;
+  routerFound: boolean;
+  routerTagMatched: boolean;
+  routesApproved: boolean;
+  unapprovedRouteDetails?: string;
+  apiError?: Error;
+  tsHostname: string;
+  routerTag: string;
+  routedSubnet: string;
+}
+
+/**
+ * Validates that all prerequisites for publishing split DNS are met:
+ * 1. CoreDNS and Traefik containers are healthy.
+ * 2. Tailscale router device is registered and visible on Tailnet.
+ * 3. Router device has the expected tag.
+ * 4. Ingress route is approved in Tailscale ACL policy.
+ *
+ * If any check fails, throws an actionable error to stop execution and preserve existing split DNS.
+ */
+export function assertSplitDnsPrerequisites(params: SplitDnsPrerequisites): void {
+  if (!params.servicesHealthy) {
+    throw new Error(
+      `Cannot publish split DNS: CoreDNS or Traefik services are not healthy (${params.unhealthyDetails || "unhealthy service state"}). ` +
+        "Existing split DNS configuration was preserved.",
+    );
+  }
+
+  if (!params.routerFound) {
+    const errorSuffix = params.apiError ? ` (Tailscale API error: ${params.apiError.message})` : "";
+    throw new Error(
+      `Cannot publish split DNS: Tailscale router device '${params.tsHostname}' was not found on Tailnet after polling${errorSuffix}. ` +
+        "Existing split DNS configuration was preserved.",
+    );
+  }
+
+  if (!params.routerTagMatched) {
+    throw new Error(
+      `Cannot publish split DNS: Router device '${params.tsHostname}' is missing required tag '${params.routerTag}'. ` +
+        "Existing split DNS configuration was preserved.",
+    );
+  }
+
+  if (!params.routesApproved) {
+    throw new Error(
+      `Cannot publish split DNS: Ingress route '${params.routedSubnet}' is not approved/active in Tailscale ACL policy (${params.unapprovedRouteDetails || "pending approval"}). ` +
+        "Existing split DNS configuration was preserved.",
+    );
+  }
+}
+
+
