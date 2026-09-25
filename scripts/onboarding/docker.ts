@@ -243,6 +243,16 @@ export async function ensureDockerNetwork(
   }
 }
 
+export async function removeDockerNetwork(networkName: string): Promise<void> {
+  try {
+    const proc = Bun.spawn(["docker", "network", "rm", networkName], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await proc.exited;
+  } catch {}
+}
+
 export async function hasLocalTailscaleState(
   tailscaleImage = "tailscale/tailscale:v1.102.3",
   dryRun = false,

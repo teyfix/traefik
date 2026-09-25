@@ -249,6 +249,17 @@ export function allocateIngressSubnet(params: {
 }): IngressSubnetAllocation {
   const { claimedRoutes, preferredSubnet, unambiguousSubnet, existingDnsIp, existingTraefikIp } = params;
 
+  function finalizeAllocation(subnet: string): IngressSubnetAllocation {
+    const dnsResolverIp = deriveDnsResolverIp(subnet, 10, existingDnsIp);
+    const traefikIp = deriveTraefikIp(subnet, 2, existingTraefikIp);
+    if (dnsResolverIp === traefikIp) {
+      throw new Error(
+        `Static IP conflict: DNS resolver IP (${dnsResolverIp}) and Traefik IP (${traefikIp}) cannot coincide. Please check configuration.`,
+      );
+    }
+    return { ingressSubnet: subnet, dnsResolverIp, traefikIp };
+  }
+
   if (preferredSubnet && preferredSubnet !== "auto") {
     if (!is10Slash24(preferredSubnet)) {
       throw new Error(`Requested ingress subnet ${preferredSubnet} must be a valid 10.* /24 subnet.`);
@@ -258,15 +269,11 @@ export function allocateIngressSubnet(params: {
     if (conflicting.length > 0) {
       throw new Error(`Requested ingress subnet ${preferredSubnet} conflicts with claimed route(s): ${conflicting.join(", ")}`);
     }
-    const dnsResolverIp = deriveDnsResolverIp(preferredSubnet, 10, existingDnsIp);
-    const traefikIp = deriveTraefikIp(preferredSubnet, 2, existingTraefikIp);
-    return { ingressSubnet: preferredSubnet, dnsResolverIp, traefikIp };
+    return finalizeAllocation(preferredSubnet);
   }
 
   if (unambiguousSubnet) {
-    const dnsResolverIp = deriveDnsResolverIp(unambiguousSubnet, 10, existingDnsIp);
-    const traefikIp = deriveTraefikIp(unambiguousSubnet, 2, existingTraefikIp);
-    return { ingressSubnet: unambiguousSubnet, dnsResolverIp, traefikIp };
+    return finalizeAllocation(unambiguousSubnet);
   }
 
   // Scan candidate 10.* /24 subnets in 10.128.0.0/16 first
@@ -276,9 +283,7 @@ export function allocateIngressSubnet(params: {
     const candCidr = `${candIp}/24`;
     const hasConflict = claimedRoutes.some((r) => cidrsOverlap(candCidr, r));
     if (!hasConflict) {
-      const dnsResolverIp = deriveDnsResolverIp(candCidr, 10, existingDnsIp);
-      const traefikIp = deriveTraefikIp(candCidr, 2, existingTraefikIp);
-      return { ingressSubnet: candCidr, dnsResolverIp, traefikIp };
+      return finalizeAllocation(candCidr);
     }
   }
 
@@ -289,9 +294,7 @@ export function allocateIngressSubnet(params: {
     const candCidr = `${candIp}/24`;
     const hasConflict = claimedRoutes.some((r) => cidrsOverlap(candCidr, r));
     if (!hasConflict) {
-      const dnsResolverIp = deriveDnsResolverIp(candCidr, 10, existingDnsIp);
-      const traefikIp = deriveTraefikIp(candCidr, 2, existingTraefikIp);
-      return { ingressSubnet: candCidr, dnsResolverIp, traefikIp };
+      return finalizeAllocation(candCidr);
     }
   }
 

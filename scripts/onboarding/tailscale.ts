@@ -59,8 +59,28 @@ export async function reconcileTailscalePolicy(params: {
 export function findRouterDevice(
   devices: TailscaleDevice[],
   tsHostname: string,
+  routerTag?: string,
 ): TailscaleDevice | undefined {
   const target = tsHostname.toLowerCase();
+  const normalizedTag = routerTag
+    ? (routerTag.startsWith("tag:") ? routerTag : `tag:${routerTag}`)
+    : undefined;
+
+  // First pass: match hostname AND routerTag to distinguish container router from host node
+  if (normalizedTag) {
+    const tagged = devices.find((d) => {
+      const devHostname = (d.hostname || "").toLowerCase();
+      const devName = (d.name || "").toLowerCase();
+      const nameMatch =
+        devHostname === target ||
+        devName === target ||
+        devName.startsWith(`${target}.`);
+      return nameMatch && (d.tags || []).includes(normalizedTag);
+    });
+    if (tagged) return tagged;
+  }
+
+  // Second pass: match hostname
   return devices.find((d) => {
     const devHostname = (d.hostname || "").toLowerCase();
     const devName = (d.name || "").toLowerCase();
@@ -80,18 +100,21 @@ export async function ensureRouterAuthKey(params: {
   hasLocalState?: boolean;
   forceRotate?: boolean;
   dryRun?: boolean;
-}): Promise<{ authKey: string; generated: boolean; needed: boolean }> {
+}): Promise<{ authKey: string; generated: boolean; needed: boolean; warning?: string }> {
   const { client, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
 
   // Single-use auth key contract:
-  // If local state is already present in the volume (hasLocalState: true) and not forceRotate,
-  // the non-ephemeral router will authenticate using its persisted state (/var/lib/tailscale/tailscaled.state).
-  // No auth key is needed or generated.
-  if (hasLocalState && !forceRotate) {
-    return { authKey: "", generated: false, needed: false };
+  // If local state is already present in the volume (hasLocalState: true):
+  // With TS_AUTH_ONCE=true, the non-ephemeral router authenticates using its persisted state (/var/lib/tailscale/tailscaled.state).
+  // Generating a new auth key with intact state would remain unused and expire after 1 hour.
+  if (hasLocalState) {
+    const warning = forceRotate
+      ? "Warning: Local Tailscale volume state is present. With TS_AUTH_ONCE=true, existing state takes precedence; new auth key generation is bypassed. Recreate volume ('docker volume rm traefik_tailscale') to re-register."
+      : undefined;
+    return { authKey: "", generated: false, needed: false, warning };
   }
 
-  // If local state is missing (fresh bootstrap or volume wipe) or forceRotate requested:
+  // If local state is missing (fresh bootstrap or volume wipe):
   // Generate a short-lived, single-use auth key.
   if (dryRun) {
     return { authKey: "mock-authkey-dryrun-single-use", generated: true, needed: true };

@@ -11,7 +11,13 @@ import {
   allocateIngressSubnet,
   allocateDockerPool,
 } from "./network";
-import { parseEnv, updateEnvContent, mergeEnvFile, redactSecret } from "./env";
+import {
+  parseEnv,
+  updateEnvContent,
+  mergeEnvFile,
+  scrubLegacyEnvFile,
+  redactSecret,
+} from "./env";
 import { mergeDaemonJson } from "./docker";
 import { mergeTailscalePolicy } from "./policy";
 import {
@@ -228,6 +234,84 @@ describe("Network & CIDR calculation", () => {
       }),
     ).toThrow("conflicts with claimed route");
   });
+
+  test("allocateIngressSubnet throws when DNS resolver and Traefik IP coincide", () => {
+    expect(() =>
+      allocateIngressSubnet({
+        claimedRoutes: [],
+        preferredSubnet: "10.128.64.0/24",
+        existingDnsIp: "10.128.64.10",
+        existingTraefikIp: "10.128.64.10",
+      }),
+    ).toThrow("cannot coincide");
+  });
+
+  test("two hosts sharing default private proxy bridge but advertising distinct ingress subnets", () => {
+    // Host 1: Ingress 10.128.1.0/24, local unadvertised proxy bridge 172.19.0.0/16
+    // Host 2: Ingress 10.128.2.0/24, local unadvertised proxy bridge 172.19.0.0/16
+    const tailnetClaimed = ["10.128.1.0/24"];
+    const host2Local = ["172.19.0.0/16"]; // Local unadvertised proxy bridge
+
+    const allocHost2 = allocateIngressSubnet({
+      claimedRoutes: [...tailnetClaimed, ...host2Local],
+      preferredSubnet: "10.128.2.0/24",
+    });
+
+    expect(allocHost2.ingressSubnet).toBe("10.128.2.0/24");
+    expect(allocHost2.traefikIp).toBe("10.128.2.2");
+    expect(allocHost2.dnsResolverIp).toBe("10.128.2.10");
+
+    // Both hosts have 172.19.0.0/16 locally, but because it is unadvertised,
+    // ownership of distinct ingress /24 subnets is unambiguous:
+    const ownership = checkIngressSubnetOwnership({
+      candidateSubnet: "10.128.2.0/24",
+      tailnetDevices: [
+        {
+          hostname: "host1-router",
+          advertisedRoutes: ["10.128.1.0/24"],
+          enabledRoutes: ["10.128.1.0/24"],
+        },
+      ],
+      routerHostname: "host2-router",
+      localRoutes: ["172.19.0.0/16"],
+      ownDockerSubnets: ["172.19.0.0/16"],
+    });
+    expect(ownership.unambiguous).toBe(true);
+  });
+
+  test("ingress subnet claimed by host-native Tailscale node is marked ambiguous and rejected", () => {
+    // host-native Tailscale node dixie and container router teyfix-router
+    const ownership = checkIngressSubnetOwnership({
+      candidateSubnet: "10.10.10.0/24",
+      tailnetDevices: [
+        {
+          id: "node-dixie",
+          name: "dixie.tailnet.ts.net",
+          hostname: "dixie",
+          advertisedRoutes: ["10.10.10.0/24", "172.19.0.0/16"],
+          enabledRoutes: ["10.10.10.0/24", "172.19.0.0/16"],
+        },
+        {
+          id: "node-router",
+          name: "teyfix-router.tailnet.ts.net",
+          hostname: "teyfix-router",
+          advertisedRoutes: ["10.10.10.0/24"],
+          enabledRoutes: [],
+        },
+      ],
+      routerHostname: "teyfix-router",
+    });
+
+    expect(ownership.unambiguous).toBe(false);
+    expect(ownership.reason).toContain("claimed by another tailnet device (dixie.tailnet.ts.net)");
+
+    expect(() =>
+      allocateIngressSubnet({
+        claimedRoutes: ["10.10.10.0/24"],
+        preferredSubnet: "10.10.10.0/24",
+      }),
+    ).toThrow("conflicts with claimed route");
+  });
 });
 
 describe("Host & DNS Zone derivation", () => {
@@ -293,6 +377,56 @@ TS_HOSTNAME="old-host"
       await mergeEnvFile(tmpFile, { BAZ: "qux" });
       const stats = statSync(tmpFile);
       expect(stats.mode & 0o777).toBe(0o600);
+    } finally {
+      await unlink(tmpFile).catch(() => {});
+    }
+  });
+
+  test("updateEnvContent scrubs stale legacy keys and updates TS_ROUTES to single ingress subnet", () => {
+    const original = `
+# Old configuration
+DOCKER_POOL="10.128.64.0/18"
+TS_SERVICE_SUBNET="10.10.10.0/24"
+DIRECT_DOMAIN="dkr.dev.example.test"
+TS_ROUTES="10.10.10.0/24,172.19.0.0/16"
+TS_AUTHKEY="tskey-auth-oldreusablekey"
+KEEP_KEY="important_custom_setting"
+`;
+    const updated = updateEnvContent(original, {
+      TS_ROUTES: "10.128.64.0/24",
+      TS_INGRESS_SUBNET: "10.128.64.0/24",
+      TRAEFIK_IP: "10.128.64.2",
+      TS_DNS_SERVER: "10.128.64.10",
+    });
+
+    expect(updated).not.toContain("DOCKER_POOL");
+    expect(updated).not.toContain("TS_SERVICE_SUBNET");
+    expect(updated).not.toContain("DIRECT_DOMAIN");
+    expect(updated).not.toContain("TS_AUTHKEY");
+    expect(updated).not.toContain("172.19.0.0/16");
+    expect(updated).toContain('TS_ROUTES="10.128.64.0/24"');
+    expect(updated).toContain('TS_INGRESS_SUBNET="10.128.64.0/24"');
+    expect(updated).toContain('KEEP_KEY="important_custom_setting"');
+  });
+
+  test("scrubLegacyEnvFile scrubs legacy credentials and stale routes without printing secrets", async () => {
+    const tmpFile = `/tmp/test-legacy-env-${Date.now()}.env`;
+    try {
+      await Bun.write(
+        tmpFile,
+        `TS_AUTHKEY="tskey-auth-supersecretkey123"\nTS_ROUTES="10.10.10.0/24,172.19.0.0/16"\nDOCKER_POOL="10.128.64.0/18"\nCUSTOM_VAR="keep_me"\n`,
+      );
+      const res = await scrubLegacyEnvFile(tmpFile);
+      expect(res.scrubbed).toBe(true);
+      expect(res.removedKeys).toContain("TS_AUTHKEY");
+      expect(res.removedKeys).toContain("TS_ROUTES");
+      expect(res.removedKeys).toContain("DOCKER_POOL");
+
+      const scrubbedContent = await Bun.file(tmpFile).text();
+      expect(scrubbedContent).not.toContain("tskey-auth-supersecretkey123");
+      expect(scrubbedContent).not.toContain("172.19.0.0/16");
+      expect(scrubbedContent).not.toContain("DOCKER_POOL");
+      expect(scrubbedContent).toContain('CUSTOM_VAR="keep_me"');
     } finally {
       await unlink(tmpFile).catch(() => {});
     }
@@ -400,8 +534,6 @@ describe("CLI resolution contract", () => {
     const options = parseCliArgs([
       "--ingress-subnet",
       "10.128.64.0/24",
-      "--docker-pool",
-      "10.128.64.0/18",
       "--ts-dns-zone",
       "dixie.gg",
       "--rotate-authkey",
@@ -410,12 +542,17 @@ describe("CLI resolution contract", () => {
       "--dry-run",
     ]);
     expect(options.ingressSubnet).toBe("10.128.64.0/24");
-    expect(options.dockerPool).toBe("10.128.64.0/18");
     expect(options.tsDnsZone).toBe("dixie.gg");
     expect(options.rotateAuthKey).toBe(true);
     expect(options.replaceSplitDns).toBe(true);
     expect(options.yes).toBe(true);
     expect(options.dryRun).toBe(true);
+  });
+
+  test("rejects deprecated --docker-pool flag with migration guidance", () => {
+    expect(() =>
+      parseCliArgs(["--docker-pool", "10.128.64.0/18"]),
+    ).toThrow("The '--docker-pool' flag has been removed");
   });
 
   test("validates ingress subnet schema", () => {
@@ -666,7 +803,8 @@ describe("Tailscale API Client semantics", () => {
       expect(res2.needed).toBe(false);
       expect(res2.authKey).toBe("");
 
-      // If forceRotate is true, generates new key even if local state is present
+      // If forceRotate is true and local state is present:
+      // Honest semantics: with TS_AUTH_ONCE=true, existing state takes precedence so key is not generated, warning returned.
       const res3 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
@@ -675,7 +813,10 @@ describe("Tailscale API Client semantics", () => {
         hasLocalState: true,
         forceRotate: true,
       });
-      expect(res3.generated).toBe(true);
+      expect(res3.generated).toBe(false);
+      expect(res3.needed).toBe(false);
+      expect(res3.authKey).toBe("");
+      expect(res3.warning).toContain("Local Tailscale volume state is present");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -745,6 +886,27 @@ describe("Tailscale API Client semantics", () => {
     expect(res.tagMatched).toBe(true);
     expect(res.routeResults.every((r) => r.passed)).toBe(true);
     expect(callCount).toBe(2);
+  });
+
+  test("pollRouterDeviceAndRoutes preserves API error context on failure", async () => {
+    const { pollRouterDeviceAndRoutes } = await import("./verify");
+    const errorClient = {
+      getDevices: async () => {
+        throw new Error("Tailscale API 401 Unauthorized: Invalid API token");
+      },
+    } as any;
+
+    const res = await pollRouterDeviceAndRoutes({
+      apiClient: errorClient,
+      tsHostname: "router",
+      routerTag: "tag:docker",
+      routesToCheck: ["10.128.64.0/24"],
+      timeoutMs: 50,
+      intervalMs: 10,
+    });
+
+    expect(res.deviceFound).toBe(false);
+    expect(res.lastApiError?.message).toContain("401 Unauthorized");
   });
 
   test("policy write does not occur when policy validation fails", async () => {

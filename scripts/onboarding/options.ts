@@ -80,6 +80,13 @@ export function parseCliArgs(args: string[] = process.argv.slice(2)): RawCliOpti
     strict: true,
   });
 
+  if (values["docker-pool"]) {
+    throw new Error(
+      "The '--docker-pool' flag has been removed. The architecture now allocates an explicit 10.* /24 ingress subnet per host. " +
+        "Use '--ingress-subnet <cidr|auto>' instead (e.g. '--ingress-subnet 10.128.64.0/24' or '--ingress-subnet auto').",
+    );
+  }
+
   return CliOptionsSchema.parse({
     ingressSubnet: values["ingress-subnet"],
     dockerPool: values["docker-pool"],
@@ -106,7 +113,7 @@ Options:
   --ts-router-tag <tag>        Tailscale tag for router device (default: tag:docker)
   --ts-hostname <name>         Tailscale router hostname (default: $(hostname -s)-router)
   --replace-split-dns          Overwrite existing Tailscale split-DNS resolver(s) for the zone if conflicting
-  --rotate-authkey             Force generation of a new Tailscale auth key instead of reusing existing key
+  --rotate-authkey             (Deprecated) Router identity is maintained in volume state; wipe volume to re-register
   -y, --yes                    Accept recommended/default values without confirmation
   --dry-run                    Plan mutations without applying any changes
   -h, --help                   Show this help text

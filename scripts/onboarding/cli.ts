@@ -31,10 +31,10 @@ import {
   findRouterDevice,
   type TailnetDiscovery,
 } from "./tailscale";
-import { parseEnv, mergeEnvFile, redactSecret } from "./env";
+import { parseEnv, mergeEnvFile, scrubLegacyEnvFile, redactSecret } from "./env";
 import { installRootCa } from "./certificates";
 import { startTraefikStack, waitForTraefikHealthy } from "./traefik";
-import { runVerification } from "./verify";
+import { runVerification, pollRouterDeviceAndRoutes } from "./verify";
 import { existsSync } from "node:fs";
 import { readFile, copyFile, chmod } from "node:fs/promises";
 
@@ -246,14 +246,25 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const dnsResolverIp = finalAllocation.dnsResolverIp;
   const traefikIp = finalAllocation.traefikIp;
 
-  // Check existing ingress networks on host
-  const ingressNet = dockerNetworks.find((n) => n.name === "traefik_ingress" || n.name === "tailscale_services");
+  // Check existing legacy and ingress networks on host
+  const legacyServicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
+  if (legacyServicesNet) {
+    const hasContainers = Boolean(legacyServicesNet.containers && legacyServicesNet.containers.length > 0);
+    if (hasContainers) {
+      throw new Error(
+        `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
+          "Stop running services ('docker compose down') before migrating to the new 'traefik_ingress' network.",
+      );
+    }
+  }
+
+  const ingressNet = dockerNetworks.find((n) => n.name === "traefik_ingress");
   let needsIngressRecreate = false;
   if (ingressNet && ingressNet.subnets[0] && ingressNet.subnets[0] !== routedSubnet) {
     const hasContainers = Boolean(ingressNet.containers && ingressNet.containers.length > 0);
     if (hasContainers) {
       throw new Error(
-        `Existing Docker network '${ingressNet.name}' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. Stop running services ('docker compose down') before migrating to the new subnet.`,
+        `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. Stop running services ('docker compose down') before migrating to the new subnet.`,
       );
     }
     needsIngressRecreate = true;
@@ -380,6 +391,11 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   actionSpinner.stop("IPv4 packet forwarding verified");
 
   // 6.2 Docker networks: ensure traefik_proxy and traefik_ingress
+  if (legacyServicesNet && !cliOptions.dryRun) {
+    actionSpinner.start("Removing legacy 'tailscale_services' network");
+    await removeDockerNetwork("tailscale_services");
+    actionSpinner.stop("Removed legacy 'tailscale_services' network");
+  }
   if (needsProxyRecreate && !cliOptions.dryRun) {
     actionSpinner.start("Recreating colliding 'traefik_proxy' network");
     await removeDockerNetwork("traefik_proxy");
@@ -410,19 +426,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
   actionSpinner.stop(policyRes.reason);
 
-  // 6.4 Tailscale Split DNS
-  actionSpinner.start(`Configuring Tailscale split DNS (${finalZone} -> ${dnsResolverIp})`);
-  const splitRes = await reconcileSplitDns({
-    client: apiClient,
-    currentSplitDns: tailnet.splitDns,
-    dnsZone: finalZone,
-    dnsResolverIp,
-    forceReplace: forceReplaceDns,
-    dryRun: cliOptions.dryRun,
-  });
-  actionSpinner.stop(splitRes.reason);
-
-  // 6.5 Tailscale Router Auth Key (single-use key if missing local state)
+  // 6.4 Tailscale Router Auth Key (single-use key if missing local state)
   actionSpinner.start(`Checking Tailscale router state and credentials for ${resolvedTag}`);
   const tailscaleImage = existingEnv.TAILSCALE_IMAGE || process.env.TAILSCALE_IMAGE;
   const localStatePresent = await hasLocalTailscaleState(tailscaleImage, cliOptions.dryRun);
@@ -435,13 +439,16 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     forceRotate: cliOptions.rotateAuthKey,
     dryRun: cliOptions.dryRun,
   });
+  if (authKeyRes.warning) {
+    p.log.warn(authKeyRes.warning);
+  }
   actionSpinner.stop(
     authKeyRes.generated
       ? `Generated short-lived single-use auth key (${redactSecret(authKeyRes.authKey)})`
       : "Reusing persistent Tailscale volume state",
   );
 
-  // 6.6 Update Traefik .env (transient auth key is NOT persisted)
+  // 6.5 Update Traefik .env (transient auth key is NOT persisted)
   actionSpinner.start("Updating Traefik .env configuration");
   const traefikDomain = `traefik.${finalZone}`;
   const envUpdates: Record<string, string> = {
@@ -461,10 +468,17 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       await chmod(envPath, 0o600).catch(() => {});
     }
     await mergeEnvFile(envPath, envUpdates);
+
+    // Scrub legacy env file if it exists so old routes, pools, or authkeys never persist into Compose
+    const legacyEnvPath = resolve(repoRoot, "env/.env.tailscale.local");
+    const scrubRes = await scrubLegacyEnvFile(legacyEnvPath);
+    if (scrubRes.scrubbed) {
+      p.log.info(`Scrubbed legacy keys from ${legacyEnvPath}: [${scrubRes.removedKeys.join(", ")}]`);
+    }
   }
   actionSpinner.stop("Traefik .env updated");
 
-  // 6.7 Start Traefik Stack
+  // 6.6 Start Traefik Stack BEFORE publishing Split DNS to prevent blackholing
   if (!cliOptions.dryRun) {
     actionSpinner.start("Starting Traefik edge services (traefik, stepca, coredns, ts-router)");
     await startTraefikStack(
@@ -479,10 +493,51 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
         : "Traefik services started (some services may still be initializing)",
     );
 
-    // 6.8 Install Step CA Root Certificate
+    // 6.7 Verify router device & route approval before publishing split DNS
+    actionSpinner.start("Verifying Tailscale router connection and route approval");
+    const routerStatus = await pollRouterDeviceAndRoutes({
+      apiClient,
+      tsHostname: resolvedTsHostname,
+      routerTag: resolvedTag,
+      routesToCheck: routesToAdvertise,
+      timeoutMs: 30000,
+    });
+    if (!routerStatus.deviceFound) {
+      actionSpinner.stop(
+        `Warning: Router device '${resolvedTsHostname}' not found yet on Tailnet. Split DNS will proceed with fallback.`,
+      );
+    } else {
+      actionSpinner.stop("Tailscale router device and route approval verified");
+    }
+
+    // 6.8 Tailscale Split DNS (published only AFTER ingress router & CoreDNS are confirmed up)
+    actionSpinner.start(`Configuring Tailscale split DNS (${finalZone} -> ${dnsResolverIp})`);
+    const splitRes = await reconcileSplitDns({
+      client: apiClient,
+      currentSplitDns: tailnet.splitDns,
+      dnsZone: finalZone,
+      dnsResolverIp,
+      forceReplace: forceReplaceDns,
+      dryRun: cliOptions.dryRun,
+    });
+    actionSpinner.stop(splitRes.reason);
+
+    // 6.9 Install Step CA Root Certificate
     actionSpinner.start("Checking & installing Step CA root certificate");
     const caRes = await installRootCa(repoRoot, cliOptions.dryRun);
     actionSpinner.stop(caRes.reason);
+  } else {
+    // In dry-run mode, also show split DNS plan
+    actionSpinner.start(`[Dry run] Planning Tailscale split DNS (${finalZone} -> ${dnsResolverIp})`);
+    const splitRes = await reconcileSplitDns({
+      client: apiClient,
+      currentSplitDns: tailnet.splitDns,
+      dnsZone: finalZone,
+      dnsResolverIp,
+      forceReplace: forceReplaceDns,
+      dryRun: true,
+    });
+    actionSpinner.stop(splitRes.reason);
   }
 
   // Phase 7: Verification
@@ -497,6 +552,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       tsHostname: resolvedTsHostname,
       routes: routesToAdvertise,
       traefikDomain,
+      expectedTraefikIp: traefikIp,
       apiClient,
     });
 

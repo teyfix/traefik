@@ -49,6 +49,7 @@ export async function pollRouterDeviceAndRoutes(params: {
   routerDev?: any;
   tagMatched: boolean;
   routeResults: VerificationResult[];
+  lastApiError?: Error;
 }> {
   const {
     apiClient,
@@ -65,11 +66,13 @@ export async function pollRouterDeviceAndRoutes(params: {
   let lastDevice: any;
   let lastRouteResults: VerificationResult[] = [];
   let tagMatched = false;
+  let lastApiError: Error | undefined;
 
   while (Date.now() - startTime <= timeoutMs) {
     try {
       const devices = await apiClient.getDevices();
-      const dev = findRouterDevice(devices, tsHostname);
+      lastApiError = undefined;
+      const dev = findRouterDevice(devices, tsHostname, routerTag);
       if (dev) {
         lastDevice = dev;
         tagMatched = (dev.tags || []).includes(tag);
@@ -86,7 +89,9 @@ export async function pollRouterDeviceAndRoutes(params: {
           };
         }
       }
-    } catch {}
+    } catch (err) {
+      lastApiError = err as Error;
+    }
 
     if (Date.now() - startTime + intervalMs > timeoutMs) break;
     await Bun.sleep(intervalMs);
@@ -97,6 +102,7 @@ export async function pollRouterDeviceAndRoutes(params: {
     routerDev: lastDevice,
     tagMatched,
     routeResults: lastRouteResults,
+    lastApiError,
   };
 }
 
@@ -109,6 +115,7 @@ export async function runVerification(params: {
   tsHostname: string;
   routes?: string[] | string;
   traefikDomain?: string;
+  expectedTraefikIp?: string;
   apiClient?: TailscaleApiClient;
   pollTimeoutMs?: number;
 }): Promise<VerificationResult[]> {
@@ -121,6 +128,7 @@ export async function runVerification(params: {
     tsHostname,
     routes,
     traefikDomain,
+    expectedTraefikIp,
     apiClient,
     pollTimeoutMs,
   } = params;
@@ -180,10 +188,13 @@ export async function runVerification(params: {
       });
 
       if (!pollRes.deviceFound) {
+        const errorDetail = pollRes.lastApiError
+          ? ` (Tailscale API error: ${pollRes.lastApiError.message})`
+          : "";
         results.push({
           step: "Tailscale router device connected",
           passed: false,
-          message: `Router device with hostname '${tsHostname}' not found on tailnet after polling`,
+          message: `Router device with hostname '${tsHostname}' not found on tailnet after polling${errorDetail}`,
         });
       } else {
         results.push({
@@ -222,11 +233,14 @@ export async function runVerification(params: {
   // 5. DNS resolution via CoreDNS
   const testHost = traefikDomain || `traefik.${dnsZone.replace(/^\./, "")}`;
   const dnsRes = await testDnsResolution(dnsResolverIp, testHost);
+  const ipMatches = expectedTraefikIp ? dnsRes.ip === expectedTraefikIp : dnsRes.resolved;
   results.push({
     step: `DNS resolution (${testHost} via ${dnsResolverIp})`,
-    passed: dnsRes.resolved,
+    passed: dnsRes.resolved && ipMatches,
     message: dnsRes.resolved
-      ? `Resolved to ${dnsRes.ip}`
+      ? expectedTraefikIp && dnsRes.ip !== expectedTraefikIp
+        ? `Resolved to ${dnsRes.ip}, expected static Traefik IP ${expectedTraefikIp}`
+        : `Resolved to ${dnsRes.ip}`
       : `Resolution failed: ${dnsRes.error || "No answer"}`,
   });
 
