@@ -66,7 +66,7 @@ export function assertNoActiveNetworkConflicts(
     if (hasContainers) {
       throw new Error(
         `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
-          "Run 'docker compose stop tailscale coredns && docker compose rm -f tailscale coredns && docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).",
+          "Run 'docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).",
       );
     }
   }
@@ -78,7 +78,7 @@ export function assertNoActiveNetworkConflicts(
     if (hasContainers) {
       throw new Error(
         `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. ` +
-          "Run 'docker compose stop traefik tailscale coredns && docker compose rm -f traefik tailscale coredns && docker network rm traefik_ingress' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).",
+          "Run 'docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress' then rerun onboarding CLI to write configuration and start services without dropping shared networks (e.g. traefik_proxy).",
       );
     }
     needsIngressRecreate = true;

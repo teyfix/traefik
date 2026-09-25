@@ -256,7 +256,16 @@ describe("Network & CIDR calculation", () => {
     expect(check4.unambiguous).toBe(false);
   });
 
-  test("assertNoActiveNetworkConflicts enforces stopping only task-owned services without broad down or pre-CLI up", () => {
+  test("assertNoActiveNetworkConflicts enforces direct docker stop/rm of task-owned containers without docker compose when old .env lacks TRAEFIK_IP", () => {
+    // Model legacy .env missing TRAEFIK_IP
+    const legacyEnvContent = [
+      "TS_SERVICE_SUBNET=10.128.32.0/24",
+      "TAIL_DOMAIN=legacy.gg",
+      "TS_HOSTNAME=legacy-host-router",
+    ].join("\n");
+    const parsedLegacyEnv = parseEnv(legacyEnvContent);
+    expect(parsedLegacyEnv.TRAEFIK_IP).toBeUndefined();
+
     // 1. Legacy tailscale_services network with active containers
     const legacyActive = [
       {
@@ -264,7 +273,7 @@ describe("Network & CIDR calculation", () => {
         id: "net-1",
         driver: "bridge",
         subnets: ["10.128.32.0/24"],
-        containers: ["container-ts-1"],
+        containers: ["traefik_tailscale", "traefik_coredns"],
       },
     ];
 
@@ -275,12 +284,13 @@ describe("Network & CIDR calculation", () => {
     try {
       assertNoActiveNetworkConflicts(legacyActive, "10.128.64.0/24");
     } catch (e: any) {
-      expect(e.message).toContain("docker compose stop tailscale coredns");
-      expect(e.message).toContain("docker compose rm -f tailscale coredns");
+      // Must use direct docker stop/rm of exact container names so missing TRAEFIK_IP in old .env does not fail Compose
+      expect(e.message).toContain("docker stop traefik_tailscale traefik_coredns");
+      expect(e.message).toContain("docker rm -f traefik_tailscale traefik_coredns");
       expect(e.message).toContain("docker network rm tailscale_services");
       expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
-      expect(e.message).not.toContain("docker compose up");
-      expect(e.message).not.toContain("docker compose down");
+      // Never use docker compose commands (which would fail during interpolation of TRAEFIK_IP:?)
+      expect(e.message).not.toContain("docker compose");
     }
 
     // 2. Differing traefik_ingress network with active containers
@@ -290,7 +300,7 @@ describe("Network & CIDR calculation", () => {
         id: "net-2",
         driver: "bridge",
         subnets: ["10.128.32.0/24"],
-        containers: ["container-ingress-1"],
+        containers: ["traefik", "traefik_tailscale", "traefik_coredns"],
       },
     ];
 
@@ -301,12 +311,11 @@ describe("Network & CIDR calculation", () => {
     try {
       assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24");
     } catch (e: any) {
-      expect(e.message).toContain("docker compose stop traefik tailscale coredns");
-      expect(e.message).toContain("docker compose rm -f traefik tailscale coredns");
+      expect(e.message).toContain("docker stop traefik traefik_tailscale traefik_coredns");
+      expect(e.message).toContain("docker rm -f traefik traefik_tailscale traefik_coredns");
       expect(e.message).toContain("docker network rm traefik_ingress");
       expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
-      expect(e.message).not.toContain("docker compose up");
-      expect(e.message).not.toContain("docker compose down");
+      expect(e.message).not.toContain("docker compose");
     }
 
     // 3. Inactive legacy and matching ingress networks pass without throwing
