@@ -147,14 +147,14 @@ When upgrading an existing checkout to the ingress-only architecture:
    `TS_API_TOKEN` values from root `.env`, then atomically creates or sanitizes
    `env/.env.tailscale.local`. It never stores the API token.
 
-   Existing non-ephemeral `teyfix-router` state remains non-ephemeral after
-   this source upgrade. The CLI now requires the Tailnet API to explicitly
-   report `isEphemeral: true` before accepting the router or publishing split
-   DNS; false or missing status stops a normal run while preserving existing
-   split DNS, and is reported as a nonfatal prerequisite by `--dry-run`. Do not
-   reset router state during an ordinary migration. The
+   The current `teyfix-router` identity is confirmed ephemeral. The CLI still
+   requires the Tailnet API to explicitly report `isEphemeral: true` before
+   accepting the router or publishing split DNS; false or missing status stops
+   a normal run while preserving existing split DNS, and is reported as a
+   nonfatal prerequisite by `--dry-run`. Do not reset router state during an
+   ordinary migration. The
    [operator guide](compose/tailscale/README.md#existing-teyfix-router-identity)
-   gives the later backup, retirement, verification, and rollback plan.
+   records the identity guard and contingency procedure.
 
 4. **Preserve local `.env`**: If migrating from very old checkouts that tracked root `.env`:
    ```bash

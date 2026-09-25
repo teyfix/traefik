@@ -267,6 +267,47 @@ Host-side DNS can behave differently when another VPN or the host's own
 Tailscale daemon manages routes. A real remote tailnet client is the decisive
 end-to-end test.
 
+### Local ingress route preference
+
+Keep the host Tailscale client's `accept-routes` enabled so it can reach other
+tailnet subnets. When this host also accepts the `/24` that its own connector
+advertises, Tailscale installs that copy in policy table 52; without a more
+specific policy rule it can take precedence over Docker's connected route in
+the main table and send local CoreDNS/Traefik traffic toward `tailscale0`.
+
+The onboarding CLI installs and enables
+`/etc/systemd/system/traefik-ingress-route.service`. Its preference-2500 rule
+is scoped only to `TS_INGRESS_SUBNET` and looks up the main table with
+`suppress_prefixlength 0`. Thus Docker's connected ingress route wins when it
+exists, while the main default route is ignored and lookup can fall through to
+Tailscale table 52 when the Docker route is absent. This follows Tailscale's
+[Linux overlapping-subnet guidance](https://tailscale.com/docs/reference/troubleshooting/network-configuration/lan-traffic-overlapping-subnets)
+and stays outside Tailscale's reserved preference range of 5200–5500. Other
+accepted routes and DNS zones are unaffected. The oneshot service survives
+reboot and tailscaled restarts, removes only its exact rule on stop, and the
+CLI refuses to replace an unrelated rule already using preference 2500.
+An exact already-active preference-2500 rule is adopted without a delete/add
+gap.
+
+If the earlier temporary preference-5200 rule exists for the same subnet, the
+CLI first installs and verifies preference 2500, then removes only the exact
+old rule. Unexpected qualifiers on either scoped rule fail closed.
+
+To roll this behavior back after the host no longer owns that ingress subnet:
+
+```bash
+sudo systemctl disable --now traefik-ingress-route.service
+ingress_subnet=10.128.0.0/24 # replace with this installation's TS_INGRESS_SUBNET
+sudo ip -4 rule del pref 2500 to "$ingress_subnet" lookup main 2>/dev/null || true
+sudo rm /etc/systemd/system/traefik-ingress-route.service
+sudo systemctl daemon-reload
+```
+
+Stopping the managed unit normally removes its scoped rule; the exact deletion
+also handles an already-inactive unit. These commands do not remove any other
+policy rule or disable Tailscale route acceptance. If the unit file does not
+match the generated unit documented here, inspect it instead of removing it.
+
 ## Normal Traefik exposure
 
 A project normally joins `traefik_proxy` and keeps its standard labels:
@@ -352,11 +393,12 @@ earlier ingress configurations to the single ingress /24 architecture:
 
 ### Existing `teyfix-router` identity
 
-An already-registered non-ephemeral `teyfix-router` remains non-ephemeral when
-this code is installed. Supplying an ephemeral auth key does not change the
-type of the identity stored in its existing volume. Perform no identity reset
-during an ordinary upgrade. Ordinary container restarts retain that state and
-cannot convert the identity.
+The current `teyfix-router` is confirmed ephemeral; preserve its persistent
+volume during ordinary upgrades and restarts. The CLI verifies this state from
+the Tailnet API rather than assuming it from the stored reusable ephemeral auth
+key. Supplying such a key cannot convert a different, already-registered
+non-ephemeral identity, so a future false or missing API value still fails
+closed without resetting state or publishing split DNS.
 
 When the API reports `isEphemeral: false`, first record the old device ID,
 routes, and approvals and confirm the stored reusable key, tag ownership,

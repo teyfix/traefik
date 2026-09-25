@@ -1,3 +1,5 @@
+import { composeSubprocessEnv } from "./compose";
+
 export interface ServiceStatus {
   name: string;
   state: string;
@@ -14,14 +16,9 @@ export async function startTraefikStack(
 ): Promise<void> {
   if (dryRun) return;
 
-  const env = {
-    ...process.env,
-    ...(extraEnv || {}),
-  };
-
   const proc = Bun.spawn(["docker", "compose", "up", "-d", "--remove-orphans"], {
     cwd: repoRoot,
-    env,
+    env: composeSubprocessEnv(extraEnv),
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -33,10 +30,12 @@ export async function startTraefikStack(
 
 export async function getTraefikServicesStatus(
   repoRoot: string,
+  extraEnv?: Record<string, string>,
 ): Promise<ServiceStatus[]> {
   try {
     const proc = Bun.spawn(["docker", "compose", "ps", "--format", "json"], {
       cwd: repoRoot,
+      env: composeSubprocessEnv(extraEnv),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -78,12 +77,13 @@ export async function getTraefikServicesStatus(
 export async function waitForTraefikHealthy(
   repoRoot: string,
   timeoutMs = DEFAULT_SERVICE_HEALTH_TIMEOUT_MS,
+  extraEnv?: Record<string, string>,
 ): Promise<{ healthy: boolean; details: Record<string, string> }> {
   const startTime = Date.now();
   const requiredServices = ["traefik", "stepca", "coredns", "tailscale"];
 
   while (Date.now() - startTime < timeoutMs) {
-    const statuses = await getTraefikServicesStatus(repoRoot);
+    const statuses = await getTraefikServicesStatus(repoRoot, extraEnv);
     const statusMap: Record<string, string> = {};
     for (const s of statuses) {
       statusMap[s.name] = s.health ? `${s.state} (${s.health})` : s.state;
@@ -104,7 +104,7 @@ export async function waitForTraefikHealthy(
     await Bun.sleep(1500);
   }
 
-  const finalStatuses = await getTraefikServicesStatus(repoRoot);
+  const finalStatuses = await getTraefikServicesStatus(repoRoot, extraEnv);
   const details: Record<string, string> = {};
   for (const s of finalStatuses) {
     details[s.name] = s.health ? `${s.state} (${s.health})` : s.state;

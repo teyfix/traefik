@@ -25,15 +25,28 @@ export function verifyDeviceRoutes(
 
     results.push({
       step: `Advertised subnet route approved (${r})`,
-      passed: routeApproved,
-      message: routeApproved
+      passed: advertisesRoute && routeApproved,
+      message: advertisesRoute && routeApproved
         ? `Route ${r} is approved and active`
+        : routeApproved
+        ? `Route ${r} is approved but no longer advertised by router device`
         : advertisesRoute
         ? `Route ${r} advertised but pending approval in Tailscale ACL`
         : `Route ${r} not advertised by router device`,
     });
   }
   return results;
+}
+
+export function unexpectedRouterRoutes(
+  routerDev: { advertisedRoutes?: string[]; enabledRoutes?: string[] },
+  expectedRoutes: string[],
+): string[] {
+  const expected = new Set(expectedRoutes);
+  return [...new Set([
+    ...(routerDev.advertisedRoutes || []),
+    ...(routerDev.enabledRoutes || []),
+  ])].filter((route) => !expected.has(route));
 }
 
 /**
@@ -52,6 +65,7 @@ export async function pollRouterDeviceAndRoutes(params: {
   routerIsEphemeral?: boolean;
   tagMatched: boolean;
   routeResults: VerificationResult[];
+  unexpectedRoutes: string[];
   lastApiError?: Error;
 }> {
   const {
@@ -68,6 +82,7 @@ export async function pollRouterDeviceAndRoutes(params: {
 
   let lastDevice: any;
   let lastRouteResults: VerificationResult[] = [];
+  let lastUnexpectedRoutes: string[] = [];
   let tagMatched = false;
   let routerIsEphemeral: boolean | undefined;
   let lastApiError: Error | undefined;
@@ -82,16 +97,23 @@ export async function pollRouterDeviceAndRoutes(params: {
         routerIsEphemeral = dev.isEphemeral;
         tagMatched = (dev.tags || []).includes(tag);
         lastRouteResults = verifyDeviceRoutes(dev, routesToCheck);
+        lastUnexpectedRoutes = unexpectedRouterRoutes(dev, routesToCheck);
 
         const allApproved =
           lastRouteResults.length > 0 && lastRouteResults.every((r) => r.passed);
-        if (routerIsEphemeral === true && tagMatched && allApproved) {
+        if (
+          routerIsEphemeral === true &&
+          tagMatched &&
+          allApproved &&
+          lastUnexpectedRoutes.length === 0
+        ) {
           return {
             deviceFound: true,
             routerDev: dev,
             routerIsEphemeral: true,
             tagMatched: true,
             routeResults: lastRouteResults,
+            unexpectedRoutes: [],
           };
         }
       }
@@ -109,6 +131,7 @@ export async function pollRouterDeviceAndRoutes(params: {
     routerIsEphemeral,
     tagMatched,
     routeResults: lastRouteResults,
+    unexpectedRoutes: lastUnexpectedRoutes,
     lastApiError,
   };
 }
@@ -125,6 +148,7 @@ export async function runVerification(params: {
   expectedTraefikIp?: string;
   apiClient?: TailscaleApiClient;
   pollTimeoutMs?: number;
+  composeEnv?: Record<string, string>;
 }): Promise<VerificationResult[]> {
   const {
     repoRoot,
@@ -138,6 +162,7 @@ export async function runVerification(params: {
     expectedTraefikIp,
     apiClient,
     pollTimeoutMs,
+    composeEnv,
   } = params;
 
   const results: VerificationResult[] = [];
@@ -161,7 +186,7 @@ export async function runVerification(params: {
   });
 
   // 3. Traefik stack containers running
-  const services = await getTraefikServicesStatus(repoRoot);
+  const services = await getTraefikServicesStatus(repoRoot, composeEnv);
   const tsRouter = services.find((s) => s.name === "tailscale");
   const traefikSvc = services.find((s) => s.name === "traefik");
   const corednsSvc = services.find((s) => s.name === "coredns");
@@ -223,6 +248,13 @@ export async function runVerification(params: {
         });
 
         results.push(...pollRes.routeResults);
+        results.push({
+          step: "Tailscale router has ingress-only route set",
+          passed: pollRes.unexpectedRoutes.length === 0,
+          message: pollRes.unexpectedRoutes.length === 0
+            ? `Router advertises/enables only ${routesToCheck.join(", ")}`
+            : `Unexpected router routes: ${pollRes.unexpectedRoutes.join(", ")}`,
+        });
       }
 
       // Split DNS rule check

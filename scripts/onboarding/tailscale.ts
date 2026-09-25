@@ -196,6 +196,7 @@ export interface SplitDnsPrerequisites {
   routerIsEphemeral?: boolean;
   routerTagMatched: boolean;
   routesApproved: boolean;
+  unexpectedRouterRoutes?: string[];
   unapprovedRouteDetails?: string;
   apiError?: Error;
   tsHostname: string;
@@ -210,6 +211,7 @@ export interface SplitDnsPrerequisites {
  * 3. The API confirms that router device is ephemeral.
  * 4. Router device has the expected tag.
  * 5. Ingress route is approved in Tailscale ACL policy.
+ * 6. The selected router advertises/enables no routes beyond the intended ingress set.
  *
  * If any check fails, throws an actionable error to stop execution and preserve existing split DNS.
  */
@@ -255,6 +257,13 @@ export function assertSplitDnsPrerequisites(params: SplitDnsPrerequisites): void
     throw new Error(
       `Cannot publish split DNS: Ingress route '${params.routedSubnet}' is not approved/active in Tailscale ACL policy (${params.unapprovedRouteDetails || "pending approval"}). ` +
         "Existing split DNS configuration was preserved.",
+    );
+  }
+
+  if ((params.unexpectedRouterRoutes || []).length > 0) {
+    throw new Error(
+      `Cannot publish split DNS: Router device '${params.tsHostname}' still advertises or enables unexpected route(s): ${params.unexpectedRouterRoutes!.join(", ")}. ` +
+        `Expected only ingress route '${params.routedSubnet}'. Existing split DNS configuration was preserved. Remove legacy/backend routes from this router and retry; unrelated devices are not modified.`,
     );
   }
 }

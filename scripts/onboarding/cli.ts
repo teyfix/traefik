@@ -8,7 +8,13 @@ import {
   IngressSubnetSchema,
   DnsZoneSchema,
 } from "./options";
-import { getHostShortName, deriveDnsZoneFromHost, getLocalRoutes, ensureIpForwarding } from "./host";
+import {
+  getHostShortName,
+  deriveDnsZoneFromHost,
+  getLocalRoutes,
+  ensureIpForwarding,
+  ensureLocalIngressRoutePreference,
+} from "./host";
 import {
   isDockerInstalled,
   isDockerDaemonReachable,
@@ -258,7 +264,9 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
 
   const localDockerSubnets = dockerNetworks.flatMap((n) => n.subnets);
 
-  // Claimed routes from ALL Tailnet devices (including offline devices)
+  // Claimed routes from ALL Tailnet devices (including offline devices).
+  // Enabled-only routes remain reserved unless ownership and staleness are
+  // independently established; the API shape alone is not enough to reuse them.
   const claimedTailnetRoutes = new Set<string>();
   for (const dev of tailnet.devices) {
     for (const r of dev.advertisedRoutes || []) claimedTailnetRoutes.add(r);
@@ -546,8 +554,19 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   // 6.6 Start Traefik Stack BEFORE publishing Split DNS to prevent blackholing
   if (!cliOptions.dryRun) {
     actionSpinner.start("Starting Traefik edge services (traefik, stepca, coredns, ts-router)");
-    await startTraefikStack(repoRoot, cliOptions.dryRun);
-    const health = await waitForTraefikHealthy(repoRoot);
+    await startTraefikStack(repoRoot, cliOptions.dryRun, envUpdates);
+    actionSpinner.stop("Traefik edge services started");
+
+    actionSpinner.start(`Preferring the local Docker route for ${routedSubnet}`);
+    await ensureLocalIngressRoutePreference(routedSubnet, cliOptions.dryRun);
+    actionSpinner.stop("Persistent local ingress route preference configured");
+
+    actionSpinner.start("Waiting for Traefik edge services to become healthy");
+    const health = await waitForTraefikHealthy(
+      repoRoot,
+      undefined,
+      envUpdates,
+    );
     actionSpinner.stop(
       health.healthy
         ? "Traefik stack is up and all services are healthy"
@@ -585,6 +604,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       routerIsEphemeral: routerStatus.routerIsEphemeral,
       routerTagMatched: routerStatus.tagMatched,
       routesApproved,
+      unexpectedRouterRoutes: routerStatus.unexpectedRoutes,
       unapprovedRouteDetails: unapprovedDetail,
       apiError: routerStatus.lastApiError,
       tsHostname: resolvedTsHostname,
@@ -606,7 +626,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
 
     // 6.9 Install Step CA Root Certificate
     actionSpinner.start("Checking & installing Step CA root certificate");
-    const caRes = await installRootCa(repoRoot, cliOptions.dryRun);
+    const caRes = await installRootCa(repoRoot, cliOptions.dryRun, envUpdates);
     actionSpinner.stop(caRes.reason);
   } else {
     // In dry-run mode, also show split DNS plan
@@ -636,6 +656,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       traefikDomain,
       expectedTraefikIp: traefikIp,
       apiClient,
+      composeEnv: envUpdates,
     });
 
     for (const r of verifyResults) {

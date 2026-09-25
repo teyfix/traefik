@@ -1,6 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { composeSubprocessEnv } from "./compose";
 
 export async function isRootCaTrusted(rootCaPath: string): Promise<boolean> {
   const hostCertPath = "/usr/local/share/ca-certificates/traefik-stepca-root-ca.crt";
@@ -18,19 +19,22 @@ export async function isRootCaTrusted(rootCaPath: string): Promise<boolean> {
   }
 }
 
-export async function exportCertsFromContainer(repoRoot: string): Promise<string> {
+export async function exportCertsFromContainer(
+  repoRoot: string,
+  extraEnv?: Record<string, string>,
+): Promise<string> {
   const certsDir = resolve(repoRoot, "certs");
   await mkdir(certsDir, { recursive: true });
 
   const procExec = Bun.spawn(
     ["docker", "compose", "exec", "stepca", "sh", "-c", "mkdir -p /tmp/exported && cp /home/step/certs/*.crt /tmp/exported"],
-    { cwd: repoRoot, stdout: "pipe", stderr: "pipe" },
+    { cwd: repoRoot, env: composeSubprocessEnv(extraEnv), stdout: "pipe", stderr: "pipe" },
   );
   await procExec.exited;
 
   const procCp = Bun.spawn(
     ["docker", "compose", "cp", "stepca:/tmp/exported/.", "./certs"],
-    { cwd: repoRoot, stdout: "pipe", stderr: "pipe" },
+    { cwd: repoRoot, env: composeSubprocessEnv(extraEnv), stdout: "pipe", stderr: "pipe" },
   );
   await procCp.exited;
 
@@ -40,13 +44,14 @@ export async function exportCertsFromContainer(repoRoot: string): Promise<string
 export async function installRootCa(
   repoRoot: string,
   dryRun = false,
+  extraEnv?: Record<string, string>,
 ): Promise<{ installed: boolean; reason: string }> {
   const rootCaPath = resolve(repoRoot, "certs/root_ca.crt");
 
   // If certs/root_ca.crt does not exist yet on host, try exporting it from stepca container
   if (!existsSync(rootCaPath)) {
     try {
-      await exportCertsFromContainer(repoRoot);
+      await exportCertsFromContainer(repoRoot, extraEnv);
     } catch {}
   }
 

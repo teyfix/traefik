@@ -169,9 +169,12 @@ ingress-only architecture. A personal suffix does not require changing
 scoped implementation change. Preserve existing shared service endpoint names.
 
 When migrating an existing host with active legacy `tailscale_services` or
-`traefik_ingress` containers, run targeted container stop and removal:
-`docker stop traefik_tailscale traefik_coredns && docker rm -f traefik_tailscale traefik_coredns && docker network rm tailscale_services`
-(or for ingress: `docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress`).
+`traefik_ingress` containers, remove only the task-owned containers by exact
+name, tolerating ones already absent, before removing the scoped network:
+`docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true`, then
+`docker network rm tailscale_services` (or for ingress:
+`docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true`,
+then `docker network rm traefik_ingress`).
 This avoids Compose failures on legacy `.env` files lacking `TRAEFIK_IP` and
 preserves shared application networks such as `traefik_proxy`.
 Matching-name `traefik_ingress` and `traefik_proxy` networks also require the

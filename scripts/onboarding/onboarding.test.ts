@@ -31,7 +31,16 @@ import {
   DnsZoneSchema,
 } from "./options";
 import { deriveDnsZoneFromHost } from "./host";
+import {
+  assertLocalRoutePriorityAvailable,
+  ensureLocalIngressRoutePreference,
+  LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY,
+  LOCAL_INGRESS_ROUTE_PRIORITY,
+  renderLocalIngressRouteService,
+} from "./host";
 import { DEFAULT_SERVICE_HEALTH_TIMEOUT_MS } from "./traefik";
+import { getTraefikServicesStatus, startTraefikStack } from "./traefik";
+import { exportCertsFromContainer } from "./certificates";
 import { DEFAULT_ROUTE_READINESS_TIMEOUT_MS } from "./verify";
 import {
   assertRouterIdentityPreflight,
@@ -556,6 +565,7 @@ describe("Network & CIDR calculation", () => {
       }),
     ).toThrow("conflicts with claimed route");
   });
+
 });
 
 describe("Host & DNS Zone derivation", () => {
@@ -563,6 +573,135 @@ describe("Host & DNS Zone derivation", () => {
     expect(deriveDnsZoneFromHost("dixie")).toBe("dixie.gg");
     expect(deriveDnsZoneFromHost("my-server", "org")).toBe("my-server.org");
     expect(deriveDnsZoneFromHost("DEV_NODE")).toBe("dev-node.gg");
+  });
+
+  test("renders an idempotent persistent rule that prefers only the local ingress route", () => {
+    const unit = renderLocalIngressRouteService("10.128.0.0/24");
+    const exactRule = `pref ${LOCAL_INGRESS_ROUTE_PRIORITY} to 10.128.0.0/24 lookup main`;
+
+    expect(unit).toContain(`ip -4 rule del ${exactRule}`);
+    expect(unit).toContain(`ip -4 rule add ${exactRule} suppress_prefixlength 0`);
+    expect(unit).toContain("if ip -4 rule show | grep -Eq");
+    expect(unit.indexOf("if ip -4 rule show")).toBeLessThan(
+      unit.indexOf(`ip -4 rule del ${exactRule}`),
+    );
+    expect(unit).toContain("RemainAfterExit=yes");
+    expect(unit).toContain("WantedBy=multi-user.target");
+    expect(unit).not.toContain("accept-routes");
+
+    const alreadyInstalled =
+      `${LOCAL_INGRESS_ROUTE_PRIORITY}: from all to 10.128.0.0/24 lookup main suppress_prefixlength 0\n`;
+    expect(() =>
+      assertLocalRoutePriorityAvailable(alreadyInstalled, "10.128.0.0/24"),
+    ).not.toThrow();
+    expect(() =>
+      assertLocalRoutePriorityAvailable(
+        `${LOCAL_INGRESS_ROUTE_PRIORITY}: from all lookup 123\n`,
+        "10.128.0.0/24",
+      ),
+    ).toThrow(/priority 2500 is already used/);
+    for (const unexpectedRule of [
+      `${LOCAL_INGRESS_ROUTE_PRIORITY}: from all to 10.128.0.0/24 lookup main suppress_prefixlength 1`,
+      `${LOCAL_INGRESS_ROUTE_PRIORITY}: from all to 10.128.0.0/24 fwmark 0x1 lookup main`,
+      `${LOCAL_INGRESS_ROUTE_PRIORITY}: from all to 10.128.0.0/24 iif eth0 lookup main`,
+    ]) {
+      expect(() =>
+        assertLocalRoutePriorityAvailable(unexpectedRule, "10.128.0.0/24"),
+      ).toThrow(/priority 2500 is already used/);
+    }
+  });
+
+  test("changing ingress subnets stops and cleans the old managed rule before reinstall", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-unit-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    const commands: string[][] = [];
+    try {
+      await Bun.write(unitPath, renderLocalIngressRouteService("10.10.10.0/24"));
+      let ipRuleRead = 0;
+      await ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
+        unitPath,
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command[0] !== "ip") return "";
+          ipRuleRead += 1;
+          return ipRuleRead === 1
+            ? "2500: from all to 10.10.10.0/24 lookup main suppress_prefixlength 0\n"
+            : "2500: from all to 10.128.0.0/24 lookup main suppress_prefixlength 0\n";
+        },
+      });
+
+      expect(commands[0]).toEqual(["ip", "-4", "rule", "show"]);
+      expect(commands[1]).toEqual([
+        "sudo", "systemctl", "stop", "traefik-ingress-route.service",
+      ]);
+      expect(commands[2]?.join(" ")).toContain(
+        "rule del pref 2500 to 10.10.10.0/24 lookup main",
+      );
+      expect(commands.some((command) => command.includes("install"))).toBe(true);
+      expect(commands.some((command) => command.includes("daemon-reload"))).toBe(true);
+      expect(commands.at(-2)).toEqual([
+        "sudo", "systemctl", "enable", "--now", "traefik-ingress-route.service",
+      ]);
+      expect(commands.at(-1)).toEqual(["ip", "-4", "rule", "show"]);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("verifies priority 2500 before removing the exact temporary priority 5200 rule", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-route-migration-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    const commands: string[][] = [];
+    try {
+      let ipRuleRead = 0;
+      await ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
+        unitPath,
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command[0] !== "ip") return "";
+          ipRuleRead += 1;
+          const legacy =
+            `${LEGACY_LOCAL_INGRESS_ROUTE_PRIORITY}: from all to 10.128.0.0/24 lookup main suppress_prefixlength 0\n`;
+          return ipRuleRead === 1
+            ? legacy
+            : `2500: from all to 10.128.0.0/24 lookup main suppress_prefixlength 0\n${legacy}`;
+        },
+      });
+
+      const enableIndex = commands.findIndex((command) => command.includes("enable"));
+      const verifyIndex = commands.findIndex(
+        (command, index) => index > enableIndex && command[0] === "ip",
+      );
+      const cleanupIndex = commands.findIndex((command) =>
+        command.join(" ").includes("rule del pref 5200 to 10.128.0.0/24 lookup main"),
+      );
+      expect(enableIndex).toBeGreaterThan(-1);
+      expect(verifyIndex).toBeGreaterThan(enableIndex);
+      expect(cleanupIndex).toBeGreaterThan(verifyIndex);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses to overwrite a same-named systemd unit it does not own", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-foreign-route-unit-"));
+    const unitPath = join(tempDirectory, "traefik-ingress-route.service");
+    let commandCalled = false;
+    try {
+      await Bun.write(unitPath, "[Service]\nExecStart=/usr/local/bin/custom-route-manager\n");
+      await expect(
+        ensureLocalIngressRoutePreference("10.128.0.0/24", false, {
+          unitPath,
+          runCommand: async () => {
+            commandCalled = true;
+            return "";
+          },
+        }),
+      ).rejects.toThrow(/Refusing to overwrite unrecognized systemd unit/);
+      expect(commandCalled).toBe(false);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -623,6 +762,78 @@ TS_HOSTNAME="old-host"
       expect(stats.mode & 0o777).toBe(0o600);
     } finally {
       await unlink(tmpFile).catch(() => {});
+    }
+  });
+
+  test("all Compose subprocesses receive fresh env values instead of stale startup values", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-compose-env-"));
+    const envPath = join(tempDirectory, ".env");
+    const originalSpawn = Bun.spawn;
+    const originalValues = {
+      TS_INGRESS_SUBNET: process.env.TS_INGRESS_SUBNET,
+      TS_ROUTES: process.env.TS_ROUTES,
+      TS_DNS_SERVER: process.env.TS_DNS_SERVER,
+      TRAEFIK_IP: process.env.TRAEFIK_IP,
+      TS_API_TOKEN: process.env.TS_API_TOKEN,
+    };
+    const composeCalls: Array<{ command: string[]; env?: Record<string, string> }> = [];
+    const envUpdates = {
+      TS_INGRESS_SUBNET: "10.128.0.0/24",
+      TS_ROUTES: "10.128.0.0/24",
+      TS_DNS_SERVER: "10.128.0.10",
+      TRAEFIK_IP: "10.128.0.2",
+    };
+
+    try {
+      process.env.TS_INGRESS_SUBNET = "10.10.10.0/24";
+      process.env.TS_ROUTES = "10.10.10.0/24";
+      process.env.TS_DNS_SERVER = "10.10.10.10";
+      process.env.TRAEFIK_IP = "10.10.10.2";
+      process.env.TS_API_TOKEN = "transient-api-token-must-not-reach-compose";
+      await Bun.write(
+        envPath,
+        "TS_INGRESS_SUBNET=10.10.10.0/24\nTS_ROUTES=10.10.10.0/24\nTS_DNS_SERVER=10.10.10.10\nTRAEFIK_IP=10.10.10.2\n",
+      );
+      await mergeEnvFile(envPath, envUpdates);
+
+      Bun.spawn = ((command: string[], options?: { env?: Record<string, string> }) => {
+        composeCalls.push({ command, env: options?.env });
+        const stdout = command.includes("ps") ? "[]" : "";
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Response(stdout),
+          stderr: new Response(""),
+        };
+      }) as unknown as typeof Bun.spawn;
+
+      await startTraefikStack(tempDirectory, false, envUpdates);
+      await getTraefikServicesStatus(tempDirectory, envUpdates);
+      await exportCertsFromContainer(tempDirectory, envUpdates);
+
+      expect(composeCalls.map((call) => call.command.slice(0, 3))).toEqual([
+        ["docker", "compose", "up"],
+        ["docker", "compose", "ps"],
+        ["docker", "compose", "exec"],
+        ["docker", "compose", "cp"],
+      ]);
+      for (const call of composeCalls) {
+        expect(call.env?.TS_INGRESS_SUBNET).toBe("10.128.0.0/24");
+        expect(call.env?.TS_ROUTES).toBe("10.128.0.0/24");
+        expect(call.env?.TS_DNS_SERVER).toBe("10.128.0.10");
+        expect(call.env?.TRAEFIK_IP).toBe("10.128.0.2");
+        expect(call.env?.TS_API_TOKEN).toBeUndefined();
+      }
+
+      const writtenEnv = parseEnv(await Bun.file(envPath).text());
+      expect(writtenEnv).toMatchObject(envUpdates);
+      expect(writtenEnv.TS_API_TOKEN).toBeUndefined();
+    } finally {
+      Bun.spawn = originalSpawn;
+      for (const [key, value] of Object.entries(originalValues)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(tempDirectory, { recursive: true, force: true });
     }
   });
 
@@ -1174,6 +1385,16 @@ describe("Tailscale API Client semantics", () => {
     expect(approvedResults[0]?.message).toContain("approved and active");
   });
 
+  test("route verification rejects an enabled-only stale expected route", async () => {
+    const { verifyDeviceRoutes } = await import("./verify");
+    const results = verifyDeviceRoutes(
+      { advertisedRoutes: [], enabledRoutes: ["10.128.0.0/24"] },
+      ["10.128.0.0/24"],
+    );
+    expect(results[0]?.passed).toBe(false);
+    expect(results[0]?.message).toContain("approved but no longer advertised");
+  });
+
   test("pollRouterDeviceAndRoutes polls and resolves router status", async () => {
     const { pollRouterDeviceAndRoutes } = await import("./verify");
     let callCount = 0;
@@ -1255,6 +1476,35 @@ describe("Tailscale API Client semantics", () => {
     expect(res.routerIsEphemeral).toBe(isEphemeral);
     expect(res.tagMatched).toBe(true);
     expect(res.routeResults.every((result) => result.passed)).toBe(true);
+  });
+
+  test("pollRouterDeviceAndRoutes reports extra advertised and enabled router routes", async () => {
+    const { pollRouterDeviceAndRoutes } = await import("./verify");
+    const fakeClient = {
+      getDevices: async () => [
+        {
+          id: "dev-1",
+          name: "router.tailnet.ts.net",
+          hostname: "router",
+          isEphemeral: true,
+          tags: ["tag:docker"],
+          advertisedRoutes: ["10.128.0.0/24", "172.19.0.0/16"],
+          enabledRoutes: ["10.128.0.0/24", "10.10.10.0/24"],
+        },
+      ],
+    } as any;
+
+    const res = await pollRouterDeviceAndRoutes({
+      apiClient: fakeClient,
+      tsHostname: "router",
+      routerTag: "tag:docker",
+      routesToCheck: ["10.128.0.0/24"],
+      timeoutMs: 0,
+      intervalMs: 1,
+    });
+
+    expect(res.routeResults.every((result) => result.passed)).toBe(true);
+    expect(res.unexpectedRoutes).toEqual(["172.19.0.0/16", "10.10.10.0/24"]);
   });
 
   test("pollRouterDeviceAndRoutes preserves API error context on failure", async () => {
@@ -1496,6 +1746,15 @@ describe("Split DNS prerequisites and gating", () => {
         unapprovedRouteDetails: "Route 10.128.64.0/24 pending approval in tailnet admin console",
       }),
     ).toThrow(/Ingress route '10.128.64.0\/24' is not approved\/active/);
+  });
+
+  test("assertSplitDnsPrerequisites rejects extra legacy routes on the selected router", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        unexpectedRouterRoutes: ["10.10.10.0/24", "172.19.0.0/16"],
+      }),
+    ).toThrow(/still advertises or enables unexpected route.*10\.10\.10\.0\/24.*172\.19\.0\.0\/16/);
   });
 
   test("proves split DNS write is never called when prerequisites fail", async () => {
