@@ -1,6 +1,8 @@
 import { TailscaleApiClient, type TailscaleDevice } from "./tailscale-api";
 import { mergeTailscalePolicy, type TailscalePolicy } from "./policy";
 
+export const AUTH_KEY_MAX_EXPIRY_SECONDS = 90 * 24 * 60 * 60;
+
 export interface TailnetDiscovery {
   devices: TailscaleDevice[];
   routes: string[];
@@ -100,32 +102,32 @@ export async function ensureRouterAuthKey(params: {
   hasLocalState?: boolean;
   forceRotate?: boolean;
   dryRun?: boolean;
-}): Promise<{ authKey: string; generated: boolean; needed: boolean; warning?: string }> {
-  const { client, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
+}): Promise<{ authKey: string; generated: boolean; needed: boolean; expiresAt?: string; warning?: string }> {
+  const { client, existingKey, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
 
-  // Single-use auth key contract:
-  // If local state is already present in the volume (hasLocalState: true):
-  // With TS_AUTH_ONCE=true, the non-ephemeral router authenticates using its persisted state (/var/lib/tailscale/tailscaled.state).
-  // Generating a new auth key with intact state would remain unused and expire after 1 hour.
-  if (hasLocalState) {
-    const warning = forceRotate
-      ? "Warning: Local Tailscale volume state is present. With TS_AUTH_ONCE=true, existing state takes precedence; new auth key generation is bypassed. Recreate volume ('docker volume rm traefik_tailscale') to re-register."
-      : undefined;
-    return { authKey: "", generated: false, needed: false, warning };
+  // The key remains available to containerboot even when volume state exists.
+  // Compose deliberately uses TS_AUTH_ONCE=false: stale state from an evicted
+  // ephemeral node can still report Running, so startup must force auth.
+  if (existingKey && !forceRotate) {
+    return { authKey: existingKey, generated: false, needed: true };
   }
 
-  // If local state is missing (fresh bootstrap or volume wipe):
-  // Generate a short-lived, single-use auth key.
   if (dryRun) {
-    return { authKey: "mock-authkey-dryrun-single-use", generated: true, needed: true };
+    const expiresAt = new Date(Date.now() + AUTH_KEY_MAX_EXPIRY_SECONDS * 1000).toISOString();
+    return { authKey: "mock-authkey-dryrun-reusable-ephemeral", generated: true, needed: true, expiresAt };
   }
 
   const generatedKey = await client.createAuthKey({
     tag: routerTag,
-    description: `Single-use router key for ${hostname}`,
+    description: `Reusable ephemeral router key for ${hostname}`,
+    expirySeconds: AUTH_KEY_MAX_EXPIRY_SECONDS,
   });
 
-  return { authKey: generatedKey, generated: true, needed: true };
+  const expiresAt = new Date(Date.now() + AUTH_KEY_MAX_EXPIRY_SECONDS * 1000).toISOString();
+  const warning = hasLocalState
+    ? "Existing Tailscale state is preserved. The replacement key will be used on the next forced-auth container start."
+    : undefined;
+  return { authKey: generatedKey, generated: true, needed: true, expiresAt, warning };
 }
 
 export async function reconcileSplitDns(params: {

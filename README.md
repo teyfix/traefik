@@ -88,7 +88,23 @@ TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --ingress-subnet auto --t
 TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --dry-run
 ```
 
-`TS_API_TOKEN` is transient and never written to disk. The onboarding process provisions a short-lived, single-use tagged router auth key (`TS_AUTHKEY`) injected transiently for initial container registration. The router preserves its state in the persistent `traefik_tailscale` Docker volume without persisting credentials to `.env`.
+`TS_API_TOKEN` is onboarding-only, transient, and never written. The CLI creates
+a preauthorized, tagged, reusable, ephemeral `TS_AUTHKEY` with the maximum
+90-day expiry and stores it atomically in gitignored
+`env/.env.tailscale.local` with mode `0600`. Compose reads that file directly;
+root `.env` and a root `.env.tailscale.local` used for operator testing are not
+production key storage. The persistent `traefik_tailscale` volume is preserved
+across ordinary restarts. Renew the key before expiry with
+`TS_API_TOKEN="..." bun scripts/onboarding.ts --rotate-authkey`; keys cannot be
+extended beyond 90 days, so this creates a replacement rather than making the
+installation indefinitely unattended.
+
+The connector forces authentication on each start. Ordinary restarts retain
+the same device through the persistent volume; after the normal 30–60 minute
+offline ephemeral eviction window, the stored reusable key creates a new device
+under the stable `TS_HOSTNAME`. The device ID and Tailscale IP may change.
+Verify recovery by the Tailnet API device and enabled-route result, not local
+`Running` status.
 
 ### 3. Manual Configuration (Alternative)
 
@@ -100,11 +116,9 @@ cp .example.env .env
 $EDITOR .env
 ```
 
-Complete the one-time tailnet policy, route-approval, DNS, and auth-key setup in
-[`compose/tailscale/README.md`](compose/tailscale/README.md). Under the transient
-auth-key contract, `TS_AUTHKEY` is a short-lived, single-use key used transiently
-for initial connector registration. The router preserves its state in the persistent
-`tailscale` (`traefik_tailscale`) Docker volume; do not persist `TS_AUTHKEY` to disk or `.env`.
+Complete the tailnet policy, route-approval, DNS, and reusable ephemeral key
+setup in [`compose/tailscale/README.md`](compose/tailscale/README.md). Store the
+key only in `env/.env.tailscale.local` with mode `0600`, never in `.env`.
 
 ### Existing checkout migration
 
@@ -122,9 +136,23 @@ When upgrading an existing checkout to the ingress-only architecture:
    ```
    Direct `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`. These commands remove only the named legacy or conflicting network; they preserve named volumes and unrelated networks such as `traefik_proxy`.
 
-2. **Scrub legacy keys**: Stale legacy variables (`TS_API_TOKEN`, `TS_AUTHKEY`, `DOCKER_POOL`, `TS_SERVICE_SUBNET`, `DIRECT_DOMAIN`, `TS_ROUTES` from `env/.env.tailscale.local`) are automatically scrubbed by the onboarding CLI. Auth keys are short-lived single-use keys and never persisted to disk; Tailscale state is preserved in the persistent `tailscale` Docker volume. Persisting `TS_AUTHKEY` in `.env` or `env/.env.tailscale.local` is obsolete.
+2. **Migrate network ownership labels safely**: The CLI detects matching
+   `traefik_ingress` or `traefik_proxy` networks created by older direct Docker
+   commands. It removes only inactive unlabeled networks so Compose can recreate
+   them with ownership labels. If either has attachments, it stops with targeted
+   inspection/migration instructions; it does not delete backend containers,
+   volumes, or an active proxy network.
 
-3. **Preserve local `.env`**: If migrating from very old checkouts that tracked root `.env`:
+3. **Migrate credentials**: The CLI removes legacy `TS_AUTHKEY` and
+   `TS_API_TOKEN` values from root `.env`, then atomically creates or sanitizes
+   `env/.env.tailscale.local`. It never stores the API token.
+
+   Existing non-ephemeral `teyfix-router` state remains non-ephemeral after
+   this source upgrade. Do not reset it during ordinary migration. The
+   [operator guide](compose/tailscale/README.md#existing-teyfix-router-identity)
+   gives the later backup, retirement, verification, and rollback plan.
+
+4. **Preserve local `.env`**: If migrating from very old checkouts that tracked root `.env`:
    ```bash
    mkdir -p .local
    cp --backup=numbered .env .local/.env.before-example-env-migration

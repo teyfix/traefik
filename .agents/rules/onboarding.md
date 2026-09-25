@@ -111,10 +111,10 @@ to make a setup check pass.
 
 Share the public CA certificate and required access invitations. `TS_API_TOKEN`
 is transient and must never be written to disk. The onboarding CLI provisions a
-short-lived, single-use tagged router auth key (`TS_AUTHKEY`) injected
-transiently for initial registration. The router preserves its identity in the
-persistent `traefik_tailscale` Docker volume without persisting `TS_AUTHKEY`
-to disk or `.env`. Persisted `TS_AUTHKEY` is obsolete and scrubbed. Never copy
+tagged, preauthorized, reusable ephemeral `TS_AUTHKEY` and atomically stores it
+only in gitignored `env/.env.tailscale.local` with mode `0600`. It expires in at
+most 90 days and requires operator replacement before expiry. Preserve the
+`traefik_tailscale` volume on ordinary restarts. Never copy
 CA private keys or another machine's Tailscale identity. Report missing access
 or a shared configuration gap with one precise next action. Configuration
 presence is not runtime verification.
@@ -132,3 +132,9 @@ If migrating an existing host with active legacy `tailscale_services` or
 (or for ingress: `docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress`).
 This avoids Compose failures on legacy `.env` files lacking `TRAEFIK_IP` and
 preserves shared application networks such as `traefik_proxy`.
+Also inspect Compose ownership labels. Remove an inactive unlabeled matching
+network so Compose can recreate it. If it is active, stop and give targeted
+attachment migration instructions; never remove backend containers or volumes.
+An existing non-ephemeral `teyfix-router` remains non-ephemeral until a later,
+authorized backed-up state reset and old-identity retirement. Do not perform
+that migration as part of an ordinary source upgrade.

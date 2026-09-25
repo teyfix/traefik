@@ -113,14 +113,16 @@ Options:
   --ts-router-tag <tag>        Tailscale tag for router device (default: tag:docker)
   --ts-hostname <name>         Tailscale router hostname (default: $(hostname -s)-router)
   --replace-split-dns          Overwrite existing Tailscale split-DNS resolver(s) for the zone if conflicting
-  --rotate-authkey             (Deprecated) Router identity is maintained in volume state; wipe volume to re-register
+  --rotate-authkey             Create and atomically store a replacement reusable ephemeral key
   -y, --yes                    Accept recommended/default values without confirmation
   --dry-run                    Plan mutations without applying any changes
   -h, --help                   Show this help text
 
 Authentication:
   TS_API_TOKEN is transiently read from the environment and is never persisted to disk.
-  Short-lived single-use auth keys are provisioned for initial container registration and never persisted.
+  A tagged, preauthorized, reusable ephemeral key is stored in the gitignored
+  env/.env.tailscale.local file with mode 0600. Tailscale limits auth-key expiry
+  to 90 days; rerun with --rotate-authkey before expiry. This does not wipe state.
 `;
 }
 

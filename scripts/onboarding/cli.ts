@@ -31,7 +31,7 @@ import {
   assertSplitDnsPrerequisites,
   type TailnetDiscovery,
 } from "./tailscale";
-import { parseEnv, mergeEnvFile, scrubLegacyEnvFile, redactSecret } from "./env";
+import { parseEnv, mergeEnvFile, writeTailscaleSecretFile } from "./env";
 import { installRootCa } from "./certificates";
 import { startTraefikStack, waitForTraefikHealthy } from "./traefik";
 import { runVerification, pollRouterDeviceAndRoutes } from "./verify";
@@ -52,6 +52,17 @@ async function removeDockerNetwork(networkName: string): Promise<void> {
       `Failed to remove Docker network '${networkName}': ${stderr.trim() || `exit code ${code}`}`,
     );
   }
+}
+
+export function shouldRenewStoredAuthKey(
+  existingKey: string | undefined,
+  expiresAt: string | undefined,
+  nowMs = Date.now(),
+  renewalWindowMs = 7 * 24 * 60 * 60 * 1000,
+): boolean {
+  if (!existingKey) return false;
+  const expiryMs = Date.parse(expiresAt || "");
+  return !Number.isFinite(expiryMs) || expiryMs <= nowMs + renewalWindowMs;
 }
 
 export function assertNoActiveNetworkConflicts(
@@ -78,12 +89,21 @@ export function assertNoActiveNetworkConflicts(
 
   const ingressNet = dockerNetworks.find((n) => n.name === "traefik_ingress");
   let needsIngressRecreate = false;
-  if (ingressNet && ingressNet.subnets[0] && ingressNet.subnets[0] !== routedSubnet) {
+  const ingressOwnedByCompose =
+    ingressNet?.labels?.["com.docker.compose.project"] === "traefik" &&
+    ingressNet?.labels?.["com.docker.compose.network"] === "ingress";
+  if (
+    ingressNet &&
+    (!ingressOwnedByCompose || (ingressNet.subnets[0] && ingressNet.subnets[0] !== routedSubnet))
+  ) {
     const hasContainers = Boolean(ingressNet.containers && ingressNet.containers.length > 0);
     if (hasContainers) {
+      const reason = !ingressOwnedByCompose
+        ? "does not have the required Compose ownership labels"
+        : `uses '${ingressNet.subnets[0]}' instead of '${routedSubnet}'`;
       const msg =
-        `Existing Docker network 'traefik_ingress' (${ingressNet.subnets[0]}) differs from routed subnet '${routedSubnet}' and has active containers. ` +
-        "Run 'docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true; docker network rm traefik_ingress' then rerun onboarding CLI to write configuration and start services. This removes only the conflicting ingress network, preserving named volumes and unrelated networks (e.g. traefik_proxy).";
+        `Existing Docker network 'traefik_ingress' ${reason} and has active containers. ` +
+        "Inspect attachments with 'docker network inspect traefik_ingress'. Stop/remove only this stack's attached containers with 'docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true', verify no unrelated attachments remain, then run 'docker network rm traefik_ingress' and rerun onboarding. Named volumes and traefik_proxy are preserved.";
       if (dryRun) {
         warnings.push(msg);
       } else {
@@ -96,11 +116,21 @@ export function assertNoActiveNetworkConflicts(
   // Check traefik_proxy network collision with routed ingress subnet
   const proxyNet = dockerNetworks.find((n) => n.name === "traefik_proxy");
   let needsProxyRecreate = false;
-  if (proxyNet && proxyNet.subnets[0] && cidrsOverlap(routedSubnet, proxyNet.subnets[0])) {
+  const proxyOwnedByCompose =
+    proxyNet?.labels?.["com.docker.compose.project"] === "traefik" &&
+    proxyNet?.labels?.["com.docker.compose.network"] === "proxy";
+  const proxyCollides = Boolean(
+    proxyNet?.subnets[0] && cidrsOverlap(routedSubnet, proxyNet.subnets[0]),
+  );
+  if (proxyNet && (!proxyOwnedByCompose || proxyCollides)) {
     const hasContainers = Boolean(proxyNet.containers && proxyNet.containers.length > 0);
     if (hasContainers) {
+      const reason = !proxyOwnedByCompose
+        ? "does not have the required Compose ownership labels"
+        : `collides with routed ingress subnet '${routedSubnet}'`;
       const msg =
-        `Existing Docker network 'traefik_proxy' (${proxyNet.subnets[0]}) collides with routed ingress subnet '${routedSubnet}' and has active containers. Disconnect containers or reconfigure network before onboarding.`;
+        `Existing Docker network 'traefik_proxy' (${proxyNet.subnets[0] || "unknown"}) ${reason} and has active containers. ` +
+        "Do not delete backend containers or volumes. Inspect attachments with 'docker network inspect traefik_proxy', stop the owning application stacks, disconnect or migrate those containers, remove only the now-inactive network with 'docker network rm traefik_proxy', then rerun onboarding so Compose recreates it with ownership labels.";
       if (dryRun) {
         warnings.push(msg);
       } else {
@@ -187,10 +217,17 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   // Check existing .env in repo (do not treat template .example.env as live state)
   const envPath = resolve(repoRoot, ".env");
   const exampleEnvPath = resolve(repoRoot, ".example.env");
+  const tailscaleSecretPath = resolve(repoRoot, "env/.env.tailscale.local");
   let existingEnv: Record<string, string> = {};
   if (existsSync(envPath)) {
     try {
       existingEnv = parseEnv(await readFile(envPath, "utf-8"));
+    } catch {}
+  }
+  let existingTailscaleSecret: Record<string, string> = {};
+  if (existsSync(tailscaleSecretPath)) {
+    try {
+      existingTailscaleSecret = parseEnv(await readFile(tailscaleSecretPath, "utf-8"));
     } catch {}
   }
 
@@ -441,17 +478,21 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   });
   actionSpinner.stop(policyRes.reason);
 
-  // 6.4 Tailscale Router Auth Key (single-use key if missing local state)
+  // 6.4 Tailscale Router Auth Key (stored reusable key supports re-login after ephemeral eviction)
   actionSpinner.start(`Checking Tailscale router state and credentials for ${resolvedTag}`);
   const tailscaleImage = existingEnv.TAILSCALE_IMAGE || process.env.TAILSCALE_IMAGE;
   const localStatePresent = await hasLocalTailscaleState(tailscaleImage, cliOptions.dryRun);
+  const storedKeyNeedsRenewal = shouldRenewStoredAuthKey(
+    existingTailscaleSecret.TS_AUTHKEY,
+    existingTailscaleSecret.TS_AUTHKEY_EXPIRES_AT,
+  );
   const authKeyRes = await ensureRouterAuthKey({
     client: apiClient,
-    existingKey: existingEnv.TS_AUTHKEY,
+    existingKey: existingTailscaleSecret.TS_AUTHKEY,
     routerTag: resolvedTag,
     hostname: resolvedTsHostname,
     hasLocalState: localStatePresent,
-    forceRotate: cliOptions.rotateAuthKey,
+    forceRotate: cliOptions.rotateAuthKey || storedKeyNeedsRenewal,
     dryRun: cliOptions.dryRun,
   });
   if (authKeyRes.warning) {
@@ -459,11 +500,11 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   }
   actionSpinner.stop(
     authKeyRes.generated
-      ? `Generated short-lived single-use auth key (${redactSecret(authKeyRes.authKey)})`
-      : "Reusing persistent Tailscale volume state",
+      ? "Generated reusable ephemeral auth key"
+      : "Reusing stored router auth key and persistent Tailscale state",
   );
 
-  // 6.5 Update Traefik .env (transient auth key is NOT persisted)
+  // 6.5 Update non-secret .env and the dedicated 0600 router credential file.
   actionSpinner.start("Updating Traefik .env configuration");
   const traefikDomain = `traefik.${finalZone}`;
   const envUpdates: Record<string, string> = {
@@ -483,24 +524,16 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       await chmod(envPath, 0o600).catch(() => {});
     }
     await mergeEnvFile(envPath, envUpdates);
-
-    // Scrub legacy env file if it exists so old routes, pools, or authkeys never persist into Compose
-    const legacyEnvPath = resolve(repoRoot, "env/.env.tailscale.local");
-    const scrubRes = await scrubLegacyEnvFile(legacyEnvPath);
-    if (scrubRes.scrubbed) {
-      p.log.info(`Scrubbed legacy keys from ${legacyEnvPath}: [${scrubRes.removedKeys.join(", ")}]`);
-    }
+    const authKeyExpiry = authKeyRes.expiresAt || existingTailscaleSecret.TS_AUTHKEY_EXPIRES_AT;
+    if (!authKeyExpiry) throw new Error("Router auth key expiry metadata is missing after renewal");
+    await writeTailscaleSecretFile(tailscaleSecretPath, authKeyRes.authKey, authKeyExpiry);
   }
   actionSpinner.stop("Traefik .env updated");
 
   // 6.6 Start Traefik Stack BEFORE publishing Split DNS to prevent blackholing
   if (!cliOptions.dryRun) {
     actionSpinner.start("Starting Traefik edge services (traefik, stepca, coredns, ts-router)");
-    await startTraefikStack(
-      repoRoot,
-      cliOptions.dryRun,
-      authKeyRes.needed ? { TS_AUTHKEY: authKeyRes.authKey } : undefined,
-    );
+    await startTraefikStack(repoRoot, cliOptions.dryRun);
     const health = await waitForTraefikHealthy(repoRoot);
     actionSpinner.stop(
       health.healthy

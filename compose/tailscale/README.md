@@ -202,17 +202,35 @@ Finally, create a Tailscale auth key from the
 (or have the onboarding CLI provision it) with these properties:
 
 - tagged with `tag:docker`
-- non-ephemeral, because this connector has a persistent identity
-- reusable disabled (a short-lived single-use key)
+- preauthorized
+- ephemeral, so the control-plane device is removed after it remains offline
+- reusable, so the same stored key can register the router again after eviction
 
 Never commit auth keys or API tokens. `TS_API_TOKEN` is transient and supplied
-only in the process environment. In the onboarding CLI flow, short-lived single-use
-`TS_AUTHKEY` credentials are provisioned on demand and injected transiently into the
-initial container startup environment; they are never written to `.env`. Persisting
-`TS_AUTHKEY` in `.env` or `env/.env.tailscale.local` is obsolete. The connector's
-Docker volume (`traefik_tailscale`) preserves its identity and state in
-`/var/lib/tailscale/tailscaled.state`, so an auth key is needed only for initial
-registration or after deliberately deleting that state.
+only in the onboarding process environment. The CLI atomically stores only the
+router `TS_AUTHKEY` and its expiry timestamp in gitignored
+`env/.env.tailscale.local` with mode `0600`; Compose loads this file directly.
+Root `.env` and a root `.env.tailscale.local` used for operator testing are not
+production key storage. Tailscale auth keys expire after at most 90 days and
+cannot be extended. Before the recorded expiry, create a replacement with:
+
+```bash
+TS_API_TOKEN="tskey-api-..." bun scripts/onboarding.ts --rotate-authkey
+```
+
+The old key remains valid until its own expiry unless an administrator revokes
+it. This renewal requires an operator and API token; the setup is unattended
+only while the stored key remains valid.
+
+The `traefik_tailscale` volume preserves `tailscaled.state` across ordinary
+restarts. Tailscale normally removes an inactive ephemeral node 30–60 minutes
+after its last activity. Compose sets `TS_AUTH_ONCE=false` intentionally. With
+`true`, stale state from an evicted ephemeral node can report local `Running`
+without a Tailnet API device. Forced auth on each container start keeps the same
+device ID during ordinary restarts, but uses the reusable key to create a new
+ephemeral device after eviction. `TS_HOSTNAME` remains stable; the Tailnet
+device ID and Tailscale IP can change after re-registration. Do not delete the
+state volume as part of an ordinary restart.
 
 ## Start and verify
 
@@ -230,6 +248,11 @@ docker compose up -d
 This starts the edge, observability, Tailscale, and CoreDNS services together.
 The equivalent Task command is `task up`; use `task down` to stop the complete
 stack while preserving its volumes.
+
+Do not accept local `BackendState=Running` alone as proof of recovery. Confirm
+the hostname/tag in the Tailnet device API and confirm that the advertised route
+is enabled. The onboarding CLI uses that API device-and-route gate before it
+publishes split DNS.
 
 Verify from a different tailnet device, not only from the Docker host:
 
@@ -308,12 +331,36 @@ earlier ingress configurations to the single ingress /24 architecture:
    > network, preserving named volumes and unrelated networks such as
    > `traefik_proxy`.
 
-2. **Scrub stale legacy variables**:
-   The onboarding CLI automatically scrubs legacy keys (`TS_API_TOKEN`,
-   `TS_AUTHKEY`, `DOCKER_POOL`, `TS_SERVICE_SUBNET`, `DIRECT_DOMAIN`, and
-   `TS_ROUTES` from `env/.env.tailscale.local`).
+   The CLI also checks the Compose ownership labels on existing
+   `traefik_ingress` and `traefik_proxy` networks. It safely removes an inactive
+   unlabeled network. For an active unlabeled ingress it asks you to inspect
+   attachments and remove only this stack's containers first. For an active
+   unlabeled proxy it stops and requires the owning application stacks to be
+   stopped/disconnected; it never deletes backend containers or volumes.
+
+2. **Separate credentials**: The onboarding CLI scrubs `TS_API_TOKEN` and
+   `TS_AUTHKEY` from root `.env`, removes any API token found in the dedicated
+   file, and writes the reusable key only to `env/.env.tailscale.local`.
 
 3. **Single routed ingress subnet**:
    Update `.env` to advertise solely `TS_INGRESS_SUBNET` (e.g. `10.10.10.0/24`)
    as `TS_ROUTES`, with static IPs for `TS_DNS_SERVER` and `TRAEFIK_IP`. Application
    backends remain on the private, unadvertised `traefik_proxy` network.
+
+### Existing `teyfix-router` identity
+
+An already-registered non-ephemeral `teyfix-router` remains non-ephemeral when
+this code is installed. Supplying an ephemeral auth key does not change the
+type of the identity stored in its existing volume. Perform no identity reset
+during an ordinary upgrade.
+
+For a later, separately authorized migration: schedule an outage; verify the
+new reusable key, tag ownership, route auto-approval, and expiry; stop the
+router; make a restorable backup of the `traefik_tailscale` volume; record the
+old device ID, routes, and approvals; retire the old Tailnet identity; then
+reset only the backed-up Tailscale state and start the connector. Verify a new
+ephemeral device with hostname `teyfix-router`, the tag, enabled ingress route,
+split DNS, and HTTPS from another tailnet client. If verification fails, stop
+the connector, retire the failed new identity, restore the volume backup, and
+restart the old identity. Do not touch CA, ACME, application volumes, or
+`traefik_proxy` during this migration.

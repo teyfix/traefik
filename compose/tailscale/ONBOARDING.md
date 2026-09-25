@@ -30,7 +30,7 @@ existing Tailnet for every contributor.
 |Target|Machine identity and whether this is access to existing services or operation of independent ingress.|
 |Names|Requested suffix, existing shared endpoints, and the split-DNS mapping already configured or authorized.|
 |Networks|Exact allocated CIDRs and reserved DNS/router/ingress IPs, with enough existing route information to check overlaps.|
-|Access|Transient TS_API_TOKEN or short-lived auth-key delivery location, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat or persist TS_AUTHKEY to disk.|
+|Access|Transient TS_API_TOKEN or reusable ephemeral auth-key delivery location, key expiry/renewal owner, existing relevant auto-approval/access policy, and CA trust instructions. Never paste the key into chat or store it outside the documented ignored credential file.|
 
 The ingress configuration uses the following ingress-only architecture:
 
@@ -89,10 +89,10 @@ Keep shared ingress, DNS and any other existing service endpoints under their
 existing owners and at their actual names. A personal application suffix
 does not rename those services. Use the developer's own credentials and
 authorized access. `TS_API_TOKEN` is transient and provided only in the process
-environment; router auth keys (`TS_AUTHKEY`) are short-lived single-use keys
-injected transiently for initial container registration. State is preserved in
-the persistent `traefik_tailscale` volume without persisting `TS_AUTHKEY` to disk
-or `.env`. Keep real secrets in the documented ignored files; share placeholder
+environment. The tagged, preauthorized, reusable ephemeral `TS_AUTHKEY` is
+stored only in gitignored `env/.env.tailscale.local` with mode `0600`; its
+maximum lifetime is 90 days, so record an operator renewal owner/date. State is
+preserved in the persistent `traefik_tailscale` volume. Keep real secrets in the documented ignored files; share placeholder
 examples and public CA certificates only. Do not copy another person's login
 files or create dummy credentials to pass setup.
 
@@ -174,6 +174,10 @@ When migrating an existing host with active legacy `tailscale_services` or
 (or for ingress: `docker stop traefik traefik_tailscale traefik_coredns && docker rm -f traefik traefik_tailscale traefik_coredns && docker network rm traefik_ingress`).
 This avoids Compose failures on legacy `.env` files lacking `TRAEFIK_IP` and
 preserves shared application networks such as `traefik_proxy`.
+Matching-name `traefik_ingress` and `traefik_proxy` networks also require the
+Compose project/network labels. The CLI removes inactive unlabeled networks;
+if active, it fails with attachment-specific instructions. Never delete
+application containers or volumes to migrate an active proxy network.
 
 ## Verification from the actual client
 
@@ -184,6 +188,8 @@ After the authorized setup, verify each affected boundary:
    still resolve to their original destinations and remain usable.
 2. Effective routes select the intended router/network; no unrelated local,
    Docker, VPN, or existing Tailnet service was redirected.
+   For an ephemeral router restart, require the Tailnet API device/tag and
+   enabled route; local `BackendState=Running` alone is insufficient.
 3. HTTPS validates the expected hostname and CA in the developer's browser
    and IDE environment. Never use disabled TLS validation as acceptance.
 4. The selected application and any required client tools work from

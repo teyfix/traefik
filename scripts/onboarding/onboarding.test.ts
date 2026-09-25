@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { statSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { mkdtemp, rm, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseCidr,
   cidrsOverlap,
@@ -15,6 +17,7 @@ import {
   parseEnv,
   updateEnvContent,
   mergeEnvFile,
+  writeTailscaleSecretFile,
   scrubLegacyEnvFile,
   redactSecret,
 } from "./env";
@@ -35,7 +38,7 @@ import {
   reconcileSplitDns,
   type SplitDnsPrerequisites,
 } from "./tailscale";
-import { assertNoActiveNetworkConflicts } from "./cli";
+import { assertNoActiveNetworkConflicts, shouldRenewStoredAuthKey } from "./cli";
 
 describe("Network & CIDR calculation", () => {
   test("parses CIDR correctly", () => {
@@ -314,15 +317,15 @@ describe("Network & CIDR calculation", () => {
     try {
       assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24");
     } catch (e: any) {
-      expect(e.message).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true;");
+      expect(e.message).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true");
       expect(e.message).toContain("docker network rm traefik_ingress");
-      expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
-      expect(e.message).toContain("preserving named volumes and unrelated networks");
+      expect(e.message).toContain("rerun onboarding");
+      expect(e.message).toContain("Named volumes and traefik_proxy are preserved");
       expect(e.message).not.toContain("docker compose");
       expect(e.message).not.toContain("docker volume");
     }
 
-    // 3. Inactive legacy and matching ingress networks pass without throwing
+    // 3. Inactive unlabeled matching ingress network is marked for safe recreation.
     const inactiveNetworks = [
       {
         name: "tailscale_services",
@@ -336,12 +339,12 @@ describe("Network & CIDR calculation", () => {
         id: "net-2",
         driver: "bridge",
         subnets: ["10.128.64.0/24"],
-        containers: ["some-container"],
+        containers: [],
       },
     ];
 
     const res = assertNoActiveNetworkConflicts(inactiveNetworks, "10.128.64.0/24");
-    expect(res.needsIngressRecreate).toBe(false);
+    expect(res.needsIngressRecreate).toBe(true);
   });
 
   test("assertNoActiveNetworkConflicts in dryRun mode returns warning without throwing on active legacy or differing ingress networks", () => {
@@ -384,7 +387,7 @@ describe("Network & CIDR calculation", () => {
     const dryRunIngress = assertNoActiveNetworkConflicts(ingressActive, "10.128.64.0/24", true);
     expect(dryRunIngress.needsIngressRecreate).toBe(true);
     expect(dryRunIngress.warning).toBeDefined();
-    expect(dryRunIngress.warning).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true;");
+    expect(dryRunIngress.warning).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true");
     expect(dryRunIngress.warning).toContain("docker network rm traefik_ingress");
   });
 
@@ -417,6 +420,28 @@ describe("Network & CIDR calculation", () => {
     const result = assertNoActiveNetworkConflicts(composeNetworks, "10.128.64.0/24");
     expect(result.needsProxyRecreate).toBe(false);
     expect(result.needsIngressRecreate).toBe(false);
+  });
+
+  test("fails safely for active unlabeled matching ingress and proxy networks", () => {
+    const ingress = {
+      name: "traefik_ingress",
+      id: "ingress-net",
+      driver: "bridge",
+      subnets: ["10.128.64.0/24"],
+      containers: ["traefik"],
+    };
+    expect(() => assertNoActiveNetworkConflicts([ingress], "10.128.64.0/24"))
+      .toThrow(/required Compose ownership labels/);
+
+    const proxy = {
+      name: "traefik_proxy",
+      id: "proxy-net",
+      driver: "bridge",
+      subnets: ["172.20.0.0/16"],
+      containers: ["application-backend"],
+    };
+    expect(() => assertNoActiveNetworkConflicts([proxy], "10.128.64.0/24"))
+      .toThrow(/Do not delete backend containers or volumes/);
   });
 
   test("allocateIngressSubnet allocates unique 10.* /24 per host and derives static IPs", () => {
@@ -600,6 +625,26 @@ TS_HOSTNAME="old-host"
     }
   });
 
+  test("atomically stores only the reusable auth key metadata with mode 0o600", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), "test-tailscale-secret-"));
+    const tmpFile = join(tempDirectory, ".env.tailscale.local");
+    try {
+      await Bun.write(tmpFile, "TS_API_TOKEN=must-not-survive\nCUSTOM_VAR=keep\n");
+      const expiry = "2026-12-24T00:00:00.000Z";
+      await writeTailscaleSecretFile(tmpFile, "test-placeholder-auth-key", expiry);
+      const stored = await Bun.file(tmpFile).text();
+      expect(stored).not.toContain("must-not-survive");
+      expect(stored).toContain("CUSTOM_VAR=keep");
+      const parsed = parseEnv(stored);
+      expect(parsed.TS_API_TOKEN).toBeUndefined();
+      expect(parsed.TS_AUTHKEY).toBe("test-placeholder-auth-key");
+      expect(parsed.TS_AUTHKEY_EXPIRES_AT).toBe(expiry);
+      expect(statSync(tmpFile).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
   test("updateEnvContent scrubs stale legacy keys and updates TS_ROUTES to single ingress subnet", () => {
     const original = `
 # Old configuration
@@ -607,7 +652,7 @@ DOCKER_POOL="10.128.64.0/18"
 TS_SERVICE_SUBNET="10.10.10.0/24"
 DIRECT_DOMAIN="dkr.dev.example.test"
 TS_ROUTES="10.10.10.0/24,172.19.0.0/16"
-TS_AUTHKEY="tskey-auth-oldreusablekey"
+TS_AUTHKEY="legacy-auth-placeholder"
 KEEP_KEY="important_custom_setting"
 `;
     const updated = updateEnvContent(original, {
@@ -632,7 +677,7 @@ KEEP_KEY="important_custom_setting"
     try {
       await Bun.write(
         tmpFile,
-        `TS_AUTHKEY="tskey-auth-supersecretkey123"\nTS_ROUTES="10.10.10.0/24,172.19.0.0/16"\nDOCKER_POOL="10.128.64.0/18"\nCUSTOM_VAR="keep_me"\n`,
+        `TS_AUTHKEY="legacy-secret-placeholder"\nTS_ROUTES="10.10.10.0/24,172.19.0.0/16"\nDOCKER_POOL="10.128.64.0/18"\nCUSTOM_VAR="keep_me"\n`,
       );
       const res = await scrubLegacyEnvFile(tmpFile);
       expect(res.scrubbed).toBe(true);
@@ -641,7 +686,7 @@ KEEP_KEY="important_custom_setting"
       expect(res.removedKeys).toContain("DOCKER_POOL");
 
       const scrubbedContent = await Bun.file(tmpFile).text();
-      expect(scrubbedContent).not.toContain("tskey-auth-supersecretkey123");
+      expect(scrubbedContent).not.toContain("legacy-secret-placeholder");
       expect(scrubbedContent).not.toContain("172.19.0.0/16");
       expect(scrubbedContent).not.toContain("DOCKER_POOL");
       expect(scrubbedContent).toContain('CUSTOM_VAR="keep_me"');
@@ -833,6 +878,25 @@ describe("CLI resolution contract", () => {
     });
     expect(val4).toBe("chosen-rec-val");
   });
+
+  test("renews stored keys with missing, invalid, expired, or near-term expiry metadata", () => {
+    const now = Date.parse("2026-09-25T00:00:00.000Z");
+    expect(shouldRenewStoredAuthKey(undefined, undefined, now)).toBe(false);
+    expect(shouldRenewStoredAuthKey("placeholder", undefined, now)).toBe(true);
+    expect(shouldRenewStoredAuthKey("placeholder", "invalid", now)).toBe(true);
+    expect(shouldRenewStoredAuthKey("placeholder", "2026-09-24T00:00:00.000Z", now)).toBe(true);
+    expect(shouldRenewStoredAuthKey("placeholder", "2026-09-30T00:00:00.000Z", now)).toBe(true);
+    expect(shouldRenewStoredAuthKey("placeholder", "2026-10-25T00:00:00.000Z", now)).toBe(false);
+  });
+
+  test("Compose forces startup auth and takes TS_AUTHKEY only from the dedicated env file", async () => {
+    const composeText = await Bun.file(
+      join(import.meta.dir, "../../compose/tailscale/docker-compose.yaml"),
+    ).text();
+    expect(composeText).toContain('TS_AUTH_ONCE: "false"');
+    expect(composeText).toContain("${PWD}/env/.env.tailscale.local");
+    expect(composeText).not.toMatch(/^\s+TS_AUTHKEY:/m);
+  });
 });
 
 describe("Tailscale API Client semantics", () => {
@@ -841,7 +905,7 @@ describe("Tailscale API Client semantics", () => {
     expect(DEFAULT_ROUTE_READINESS_TIMEOUT_MS).toBe(120_000);
   });
 
-  test("creates single-use tagged auth key payload", async () => {
+  test("creates reusable ephemeral tagged auth key payload at the 90-day maximum", async () => {
     let capturedBody: any;
     const mockFetch = async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).endsWith("/keys")) {
@@ -862,11 +926,11 @@ describe("Tailscale API Client semantics", () => {
       const key = await client.createAuthKey({ tag: "tag:docker" });
 
       expect(key).toBe("mock-auth-test-key");
-      expect(capturedBody.capabilities.devices.create.reusable).toBe(false);
-      expect(capturedBody.capabilities.devices.create.ephemeral).toBe(false);
+      expect(capturedBody.capabilities.devices.create.reusable).toBe(true);
+      expect(capturedBody.capabilities.devices.create.ephemeral).toBe(true);
       expect(capturedBody.capabilities.devices.create.preauthorized).toBe(true);
       expect(capturedBody.capabilities.devices.create.tags).toEqual(["tag:docker"]);
-      expect(capturedBody.expirySeconds).toBe(3600);
+      expect(capturedBody.expirySeconds).toBe(90 * 24 * 60 * 60);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -965,7 +1029,7 @@ describe("Tailscale API Client semantics", () => {
     expect(dryRunForce.reason).toContain("replacing [1.2.3.4]");
   });
 
-  test("ensureRouterAuthKey generates a key only when local state is missing", async () => {
+  test("ensureRouterAuthKey reuses a stored key and rotates without deleting state", async () => {
     let keysCreated = 0;
     const mockFetch = async () => {
       keysCreated++;
@@ -1002,8 +1066,8 @@ describe("Tailscale API Client semantics", () => {
       expect(findRouterDevice(devices as any, "my-router")?.id).toBe("2");
       expect(findRouterDevice(devices as any, "unknown-router")).toBeUndefined();
 
-      // When local state is missing (hasLocalState: false), old key triggers regeneration
-      const safeExistingKey = ["tskey", "auth", "oldvalidkey123"].join("-");
+      // A stored reusable key remains available for stale-state reauthentication.
+      const safeExistingKey = "stored-auth-placeholder";
       const res1 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
@@ -1011,23 +1075,22 @@ describe("Tailscale API Client semantics", () => {
         hostname: "router",
         hasLocalState: false,
       });
-      expect(res1.generated).toBe(true);
-      expect(res1.authKey).toBe("fresh-auth-key");
+      expect(res1.generated).toBe(false);
+      expect(res1.authKey).toBe(safeExistingKey);
 
-      // If local state is present (hasLocalState: true) and forceRotate is false, reuses persistent volume state
+      // Missing stored credentials generates a replacement even with state present.
       const res2 = await ensureRouterAuthKey({
         client,
-        existingKey: safeExistingKey,
+        existingKey: undefined,
         routerTag: "tag:docker",
         hostname: "router",
         hasLocalState: true,
       });
-      expect(res2.generated).toBe(false);
-      expect(res2.needed).toBe(false);
-      expect(res2.authKey).toBe("");
+      expect(res2.generated).toBe(true);
+      expect(res2.needed).toBe(true);
+      expect(res2.authKey).toBe("fresh-auth-key");
 
-      // If forceRotate is true and local state is present:
-      // Honest semantics: with TS_AUTH_ONCE=true, existing state takes precedence so key is not generated, warning returned.
+      // Rotation writes a new key while explicitly preserving state.
       const res3 = await ensureRouterAuthKey({
         client,
         existingKey: safeExistingKey,
@@ -1036,10 +1099,11 @@ describe("Tailscale API Client semantics", () => {
         hasLocalState: true,
         forceRotate: true,
       });
-      expect(res3.generated).toBe(false);
-      expect(res3.needed).toBe(false);
-      expect(res3.authKey).toBe("");
-      expect(res3.warning).toContain("Local Tailscale volume state is present");
+      expect(res3.generated).toBe(true);
+      expect(res3.needed).toBe(true);
+      expect(res3.authKey).toBe("fresh-auth-key");
+      expect(res3.warning).toContain("Existing Tailscale state is preserved");
+      expect(keysCreated).toBe(2);
     } finally {
       globalThis.fetch = originalFetch;
     }
