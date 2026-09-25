@@ -250,9 +250,12 @@ The equivalent Task command is `task up`; use `task down` to stop the complete
 stack while preserving its volumes.
 
 Do not accept local `BackendState=Running` alone as proof of recovery. Confirm
-the hostname/tag in the Tailnet device API and confirm that the advertised route
-is enabled. The onboarding CLI uses that API device-and-route gate before it
-publishes split DNS.
+the hostname/tag in the Tailnet device API, require `isEphemeral: true`, and
+confirm that the advertised route is enabled. The onboarding CLI uses all three
+API checks before it publishes split DNS. If duplicate devices have the matching
+hostname and tag, it prefers the device explicitly reported as ephemeral. A
+false or missing `isEphemeral` value fails closed and leaves existing split DNS
+unchanged.
 
 Verify from a different tailnet device, not only from the Docker host:
 
@@ -352,15 +355,35 @@ earlier ingress configurations to the single ingress /24 architecture:
 An already-registered non-ephemeral `teyfix-router` remains non-ephemeral when
 this code is installed. Supplying an ephemeral auth key does not change the
 type of the identity stored in its existing volume. Perform no identity reset
-during an ordinary upgrade.
+during an ordinary upgrade. Ordinary container restarts retain that state and
+cannot convert the identity.
 
-For a later, separately authorized migration: schedule an outage; verify the
-new reusable key, tag ownership, route auto-approval, and expiry; stop the
-router; make a restorable backup of the `traefik_tailscale` volume; record the
-old device ID, routes, and approvals; retire the old Tailnet identity; then
-reset only the backed-up Tailscale state and start the connector. Verify a new
-ephemeral device with hostname `teyfix-router`, the tag, enabled ingress route,
-split DNS, and HTTPS from another tailnet client. If verification fails, stop
-the connector, retire the failed new identity, restore the volume backup, and
-restart the old identity. Do not touch CA, ACME, application volumes, or
-`traefik_proxy` during this migration.
+When the API reports `isEphemeral: false`, first record the old device ID,
+routes, and approvals and confirm the stored reusable key, tag ownership,
+route auto-approval, and key expiry. Then plan a separately authorized outage:
+
+1. Make a fresh, restorable backup of the task-owned `traefik_tailscale` state volume.
+2. Stop and remove only the `traefik_tailscale` router container.
+3. Retire only the old Tailnet device after matching its recorded hostname,
+   tag, and device ID in the administration console.
+4. Only with separate authorization, reset only the backed-up router state
+   volume. Do not reset it during an ordinary restart or source upgrade.
+5. Rerun onboarding with the stored reusable key and verify that the API reports
+   a new `isEphemeral: true` device with the expected hostname, tag, and enabled
+   ingress route before split DNS changes. Then verify DNS and HTTPS from
+   another tailnet client.
+
+Those are manual, one-time cutover steps; the CLI does not retire Tailnet
+devices or reset the state volume. If the same separately authorized cutover
+also retires the legacy `tailscale_services` network, first inspect its
+attachments and require them to be exactly the old task-owned router and
+CoreDNS containers. Stop/remove only those two containers, remove only that
+disconnected legacy network, and rerun onboarding with the explicitly allocated
+`--ts-dns-zone` plus `--replace-split-dns` when replacement was authorized. The
+API gate must still confirm `isEphemeral: true` and the approved ingress route
+before the DNS write. This combined legacy cutover is not an ordinary restart.
+
+If verification fails, stop the router, retire the failed new identity, restore
+the volume backup, and restart the old identity. Do not touch Step CA or ACME
+state, `traefik_proxy`, application containers, or application volumes during
+this migration.

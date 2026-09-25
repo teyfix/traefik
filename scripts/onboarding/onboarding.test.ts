@@ -34,6 +34,7 @@ import { deriveDnsZoneFromHost } from "./host";
 import { DEFAULT_SERVICE_HEALTH_TIMEOUT_MS } from "./traefik";
 import { DEFAULT_ROUTE_READINESS_TIMEOUT_MS } from "./verify";
 import {
+  assertRouterIdentityPreflight,
   assertSplitDnsPrerequisites,
   reconcileSplitDns,
   type SplitDnsPrerequisites,
@@ -947,6 +948,7 @@ describe("Tailscale API Client semantics", () => {
               id: "12345",
               name: "my-router",
               hostname: "my-router",
+              isEphemeral: true,
               Tags: ["tag:docker"],
               AdvertisedRoutes: ["10.128.64.0/24"],
               EnabledRoutes: ["10.128.64.0/24"],
@@ -968,6 +970,31 @@ describe("Tailscale API Client semantics", () => {
       expect(devices[0]?.advertisedRoutes).toEqual(["10.128.64.0/24"]);
       expect(devices[0]?.enabledRoutes).toEqual(["10.128.64.0/24"]);
       expect(devices[0]?.tags).toEqual(["tag:docker"]);
+      expect(devices[0]?.isEphemeral).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("getDevices preserves false and missing isEphemeral API values", async () => {
+    const mockFetch = async () =>
+      new Response(
+        JSON.stringify({
+          devices: [
+            { id: "old", name: "router-old", hostname: "router-old", isEphemeral: false },
+            { id: "unknown", name: "router-unknown", hostname: "router-unknown" },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetch as any;
+    try {
+      const { TailscaleApiClient } = await import("./tailscale-api");
+      const devices = await new TailscaleApiClient("mock-token").getDevices();
+      expect(devices[0]?.isEphemeral).toBe(false);
+      expect(devices[1]?.isEphemeral).toBeUndefined();
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1066,6 +1093,24 @@ describe("Tailscale API Client semantics", () => {
       expect(findRouterDevice(devices as any, "my-router")?.id).toBe("2");
       expect(findRouterDevice(devices as any, "unknown-router")).toBeUndefined();
 
+      const duplicateDevices = [
+        {
+          id: "old-persistent",
+          name: "my-router.tailnet.ts.net",
+          hostname: "my-router",
+          isEphemeral: false,
+          tags: ["tag:docker"],
+        },
+        {
+          id: "new-ephemeral",
+          name: "my-router.tailnet.ts.net",
+          hostname: "my-router",
+          isEphemeral: true,
+          tags: ["tag:docker"],
+        },
+      ];
+      expect(findRouterDevice(duplicateDevices as any, "my-router", "tag:docker")?.id).toBe("new-ephemeral");
+
       // A stored reusable key remains available for stale-state reauthentication.
       const safeExistingKey = "stored-auth-placeholder";
       const res1 = await ensureRouterAuthKey({
@@ -1141,6 +1186,7 @@ describe("Tailscale API Client semantics", () => {
               id: "dev-1",
               name: "router.tailnet.ts.net",
               hostname: "router",
+              isEphemeral: true,
               tags: ["tag:docker"],
               advertisedRoutes: ["10.128.64.0/24"],
               enabledRoutes: [],
@@ -1152,6 +1198,7 @@ describe("Tailscale API Client semantics", () => {
             id: "dev-1",
             name: "router.tailnet.ts.net",
             hostname: "router",
+            isEphemeral: true,
             tags: ["tag:docker"],
             advertisedRoutes: ["10.128.64.0/24"],
             enabledRoutes: ["10.128.64.0/24"],
@@ -1170,9 +1217,44 @@ describe("Tailscale API Client semantics", () => {
     });
 
     expect(res.deviceFound).toBe(true);
+    expect(res.routerIsEphemeral).toBe(true);
     expect(res.tagMatched).toBe(true);
     expect(res.routeResults.every((r) => r.passed)).toBe(true);
     expect(callCount).toBe(2);
+  });
+
+  test.each([
+    ["non-ephemeral", false],
+    ["missing ephemeral status", undefined],
+  ])("pollRouterDeviceAndRoutes rejects %s router identity", async (_label, isEphemeral) => {
+    const { pollRouterDeviceAndRoutes } = await import("./verify");
+    const fakeClient = {
+      getDevices: async () => [
+        {
+          id: "dev-1",
+          name: "router.tailnet.ts.net",
+          hostname: "router",
+          isEphemeral,
+          tags: ["tag:docker"],
+          advertisedRoutes: ["10.128.64.0/24"],
+          enabledRoutes: ["10.128.64.0/24"],
+        },
+      ],
+    } as any;
+
+    const res = await pollRouterDeviceAndRoutes({
+      apiClient: fakeClient,
+      tsHostname: "router",
+      routerTag: "tag:docker",
+      routesToCheck: ["10.128.64.0/24"],
+      timeoutMs: 0,
+      intervalMs: 1,
+    });
+
+    expect(res.deviceFound).toBe(true);
+    expect(res.routerIsEphemeral).toBe(isEphemeral);
+    expect(res.tagMatched).toBe(true);
+    expect(res.routeResults.every((result) => result.passed)).toBe(true);
   });
 
   test("pollRouterDeviceAndRoutes preserves API error context on failure", async () => {
@@ -1340,6 +1422,7 @@ describe("Split DNS prerequisites and gating", () => {
   const basePrereqs: SplitDnsPrerequisites = {
     servicesHealthy: true,
     routerFound: true,
+    routerIsEphemeral: true,
     routerTagMatched: true,
     routesApproved: true,
     tsHostname: "ts-docker-test",
@@ -1378,6 +1461,31 @@ describe("Split DNS prerequisites and gating", () => {
         routerTagMatched: false,
       }),
     ).toThrow(/missing required tag 'tag:docker-router'/);
+  });
+
+  test("assertSplitDnsPrerequisites rejects a non-ephemeral router with migration boundaries", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        routerIsEphemeral: false,
+      }),
+    ).toThrow(/back up the task-owned 'traefik_tailscale' state volume/);
+
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        routerIsEphemeral: false,
+      }),
+    ).toThrow(/Do not change CA\/ACME state, traefik_proxy, or application backends/);
+  });
+
+  test("assertSplitDnsPrerequisites rejects missing ephemeral status", () => {
+    expect(() =>
+      assertSplitDnsPrerequisites({
+        ...basePrereqs,
+        routerIsEphemeral: undefined,
+      }),
+    ).toThrow(/did not confirm.*is ephemeral/);
   });
 
   test("assertSplitDnsPrerequisites throws when ingress route is not approved in Tailscale ACL", () => {
@@ -1424,5 +1532,81 @@ describe("Split DNS prerequisites and gating", () => {
     expect(caughtError).not.toBeNull();
     expect(caughtError?.message).toContain("Ingress route '10.128.64.0/24' is not approved/active");
     expect(updateSplitDnsCalled).toBe(false);
+  });
+
+  test.each([
+    ["non-ephemeral", false],
+    ["missing ephemeral status", undefined],
+  ])("preserves split DNS for a %s router", async (_label, routerIsEphemeral) => {
+    let updateSplitDnsCalled = false;
+    const mockApiClient: any = {
+      updateSplitDns: async () => {
+        updateSplitDnsCalled = true;
+      },
+    };
+
+    try {
+      assertSplitDnsPrerequisites({ ...basePrereqs, routerIsEphemeral });
+      await reconcileSplitDns({
+        client: mockApiClient,
+        currentSplitDns: { "example.ts.net": ["10.128.64.20"] },
+        dnsZone: "example.ts.net",
+        dnsResolverIp: "10.128.64.10",
+        forceReplace: true,
+      });
+    } catch {}
+
+    expect(updateSplitDnsCalled).toBe(false);
+  });
+});
+
+describe("Router identity preflight", () => {
+  const baseDevice = {
+    id: "device-123",
+    name: "router.tailnet.ts.net",
+    hostname: "router",
+    tags: ["tag:docker"],
+    addresses: ["100.64.0.1"],
+  };
+
+  test("accepts only an explicitly ephemeral existing identity", () => {
+    expect(() =>
+      assertRouterIdentityPreflight({
+        device: { ...baseDevice, isEphemeral: true },
+        tsHostname: "router",
+      }),
+    ).not.toThrow();
+  });
+
+  test("rejects a non-ephemeral existing identity before mutations with migration advice", () => {
+    expect(() =>
+      assertRouterIdentityPreflight({
+        device: { ...baseDevice, isEphemeral: false },
+        tsHostname: "router",
+      }),
+    ).toThrow(/A normal run stops before policy, network, credential, state, container, or split-DNS mutations.*Back up the task-owned 'traefik_tailscale' state volume/);
+  });
+
+  test("rejects missing existing identity status before mutations", () => {
+    expect(() =>
+      assertRouterIdentityPreflight({
+        device: baseDevice,
+        tsHostname: "router",
+      }),
+    ).toThrow(/did not report isEphemeral.*A normal run stops before policy, network, credential, state, container, or split-DNS mutations/);
+  });
+
+  test.each([
+    ["non-ephemeral", false],
+    ["missing status", undefined],
+  ])("reports %s identity as a nonfatal dry-run prerequisite", (_label, isEphemeral) => {
+    const warning = assertRouterIdentityPreflight({
+      device: { ...baseDevice, isEphemeral },
+      tsHostname: "router",
+      dryRun: true,
+    });
+
+    expect(warning).toContain("router");
+    expect(warning).toContain("A normal run stops before policy, network, credential, state, container, or split-DNS mutations");
   });
 });

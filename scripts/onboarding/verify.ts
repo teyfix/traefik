@@ -49,6 +49,7 @@ export async function pollRouterDeviceAndRoutes(params: {
 }): Promise<{
   deviceFound: boolean;
   routerDev?: any;
+  routerIsEphemeral?: boolean;
   tagMatched: boolean;
   routeResults: VerificationResult[];
   lastApiError?: Error;
@@ -68,6 +69,7 @@ export async function pollRouterDeviceAndRoutes(params: {
   let lastDevice: any;
   let lastRouteResults: VerificationResult[] = [];
   let tagMatched = false;
+  let routerIsEphemeral: boolean | undefined;
   let lastApiError: Error | undefined;
 
   while (Date.now() - startTime <= timeoutMs) {
@@ -77,15 +79,17 @@ export async function pollRouterDeviceAndRoutes(params: {
       const dev = findRouterDevice(devices, tsHostname, routerTag);
       if (dev) {
         lastDevice = dev;
+        routerIsEphemeral = dev.isEphemeral;
         tagMatched = (dev.tags || []).includes(tag);
         lastRouteResults = verifyDeviceRoutes(dev, routesToCheck);
 
         const allApproved =
           lastRouteResults.length > 0 && lastRouteResults.every((r) => r.passed);
-        if (tagMatched && allApproved) {
+        if (routerIsEphemeral === true && tagMatched && allApproved) {
           return {
             deviceFound: true,
             routerDev: dev,
+            routerIsEphemeral: true,
             tagMatched: true,
             routeResults: lastRouteResults,
           };
@@ -102,6 +106,7 @@ export async function pollRouterDeviceAndRoutes(params: {
   return {
     deviceFound: Boolean(lastDevice),
     routerDev: lastDevice,
+    routerIsEphemeral,
     tagMatched,
     routeResults: lastRouteResults,
     lastApiError,
@@ -205,6 +210,16 @@ export async function runVerification(params: {
           message: pollRes.tagMatched
             ? `Device '${pollRes.routerDev?.name}' has tag ${routerTag}`
             : `Tag ${routerTag} missing on router device '${pollRes.routerDev?.name}'`,
+        });
+
+        results.push({
+          step: "Tailscale router is ephemeral",
+          passed: pollRes.routerIsEphemeral === true,
+          message: pollRes.routerIsEphemeral === true
+            ? `Device '${pollRes.routerDev?.name}' is ephemeral`
+            : pollRes.routerIsEphemeral === false
+            ? `Device '${pollRes.routerDev?.name}' is non-ephemeral; follow the documented router identity migration before publishing split DNS`
+            : `Tailscale API did not report isEphemeral for device '${pollRes.routerDev?.name}'`,
         });
 
         results.push(...pollRes.routeResults);

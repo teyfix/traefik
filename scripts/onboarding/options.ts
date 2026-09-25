@@ -123,6 +123,13 @@ Authentication:
   A tagged, preauthorized, reusable ephemeral key is stored in the gitignored
   env/.env.tailscale.local file with mode 0600. Tailscale limits auth-key expiry
   to 90 days; rerun with --rotate-authkey before expiry. This does not wipe state.
+
+Router identity safety:
+  Split DNS is changed only when the Tailnet API explicitly reports isEphemeral=true
+  for the matching hostname/tag device and its ingress route is approved. False or
+  missing status is a nonfatal planned prerequisite in --dry-run, but stops a normal
+  run before mutations and preserves existing split DNS. See compose/tailscale/README.md
+  for the separately authorized non-ephemeral identity migration.
 `;
 }
 

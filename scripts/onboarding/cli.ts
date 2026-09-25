@@ -28,6 +28,8 @@ import {
   reconcileTailscalePolicy,
   ensureRouterAuthKey,
   reconcileSplitDns,
+  findRouterDevice,
+  assertRouterIdentityPreflight,
   assertSplitDnsPrerequisites,
   type TailnetDiscovery,
 } from "./tailscale";
@@ -236,6 +238,15 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
   const resolvedTsHostname = cliOptions.tsHostname || existingEnv.TS_HOSTNAME || defaultTsHostname;
   const rawTag = cliOptions.tsRouterTag || existingEnv.TS_ROUTER_TAG || "tag:docker";
   const resolvedTag = rawTag.startsWith("tag:") ? rawTag : `tag:${rawTag}`;
+  const existingRouterDevice = findRouterDevice(tailnet.devices, resolvedTsHostname, resolvedTag);
+  if (existingRouterDevice) {
+    const identityWarning = assertRouterIdentityPreflight({
+      device: existingRouterDevice,
+      tsHostname: resolvedTsHostname,
+      dryRun: cliOptions.dryRun,
+    });
+    if (identityWarning) p.log.warn(`Planned prerequisite:\n${identityWarning}`);
+  }
 
   // Exempt only current traefik_ingress or legacy tailscale_services subnet when ownership is proven;
   // all other local Docker subnets are conflicts.
@@ -551,6 +562,8 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     });
     if (!routerStatus.deviceFound) {
       actionSpinner.stop("Router device not found on Tailnet");
+    } else if (routerStatus.routerIsEphemeral !== true) {
+      actionSpinner.stop("Router device is not confirmed ephemeral; split DNS will be preserved");
     } else {
       actionSpinner.stop("Tailscale router device and route approval verified");
     }
@@ -567,6 +580,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       servicesHealthy: health.healthy,
       unhealthyDetails: health.healthy ? undefined : "Traefik or CoreDNS container failed healthcheck",
       routerFound: routerStatus.deviceFound,
+      routerIsEphemeral: routerStatus.routerIsEphemeral,
       routerTagMatched: routerStatus.tagMatched,
       routesApproved,
       unapprovedRouteDetails: unapprovedDetail,

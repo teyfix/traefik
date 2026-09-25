@@ -4,6 +4,7 @@ export interface TailscaleDevice {
   id: string;
   name: string;
   hostname: string;
+  isEphemeral?: boolean;
   tags?: string[];
   addresses: string[];
   advertisedRoutes?: string[];
@@ -98,6 +99,7 @@ export class TailscaleApiClient {
       id: d.id,
       name: d.name,
       hostname: d.hostname,
+      isEphemeral: d.isEphemeral ?? d.IsEphemeral,
       tags: d.tags || d.Tags || [],
       addresses: d.addresses || d.Addresses || [],
       advertisedRoutes: d.AdvertisedRoutes || d.advertisedRoutes || [],
