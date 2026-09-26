@@ -194,7 +194,9 @@ export async function pollRouterDeviceAndRoutes(params: {
   let routerIsEphemeral: boolean | undefined;
   let lastApiError: Error | undefined;
 
-  while (Date.now() - startTime <= timeoutMs) {
+  // Always inspect once, including timeoutMs=0. The clock can advance between
+  // recording startTime and entering the loop; it must only limit retries.
+  do {
     try {
       const devices = await apiClient.getDevices();
       lastApiError = undefined;
@@ -230,7 +232,7 @@ export async function pollRouterDeviceAndRoutes(params: {
 
     if (Date.now() - startTime + intervalMs > timeoutMs) break;
     await Bun.sleep(intervalMs);
-  }
+  } while (Date.now() - startTime <= timeoutMs);
 
   return {
     deviceFound: Boolean(lastDevice),
