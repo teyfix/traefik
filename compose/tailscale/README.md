@@ -232,6 +232,24 @@ ephemeral device after eviction. `TS_HOSTNAME` remains stable; the Tailnet
 device ID and Tailscale IP can change after re-registration. Do not delete the
 state volume as part of an ordinary restart.
 
+The connector healthcheck requires both containerboot's local health endpoint
+and a running daemon whose own `Online` status is true. It excludes peer status:
+an online peer cannot hide an offline router. A stale identity can retain its
+local IP and report `Running` after the control plane returns `node not found`,
+so the local endpoint alone is insufficient. The check uses the Tailscale CLI's
+formatted JSON status; missing or changed expected fields fail closed. The
+existing 15 consecutive failures at 30-second intervals tolerate brief outages.
+An offline result can also mean a temporary control-plane outage; it does not
+by itself prove that the identity was deleted.
+
+Docker does not automatically restart unhealthy containers. Inspect the
+connector status and control-plane errors first. If its node identity is gone,
+verify the stored reusable key has not expired, then restart only the connector
+(`docker compose restart tailscale`) to force authentication while preserving
+the state volume. Confirm the Tailnet API identity, ephemeral flag, enabled
+route, and a remote client's DNS/HTTPS path afterward as described below. Do
+not reset the volume or publish DNS based only on container health.
+
 ## Start and verify
 
 From the repository root, copy `.example.env` to the gitignored `.env` and
