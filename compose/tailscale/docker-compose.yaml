@@ -29,6 +29,7 @@ services:
     volumes:
       - tailscale:/var/lib/tailscale
       - ${PWD}/compose/tailscale/entrypoint.sh:/usr/local/bin/tailscale-entrypoint.sh:ro
+      - ${PWD}/compose/tailscale/healthcheck.sh:/usr/local/bin/tailscale-healthcheck.sh:ro
     networks:
       - ingress
     cap_add:
@@ -49,7 +50,7 @@ services:
         condition: service_healthy
     healthcheck:
       <<: *healthcheck
-      test: [CMD, wget, -q, --spider, http://127.0.0.1:9002/healthz]
+      test: [CMD, sh, /usr/local/bin/tailscale-healthcheck.sh]
 
   coredns:
     container_name: traefik_coredns
