@@ -1661,6 +1661,34 @@ describe("Tailscale API Client semantics", () => {
     expect(res.routeResults.every((result) => result.passed)).toBe(true);
   });
 
+  test("pollRouterDeviceAndRoutes inspects once at zero timeout even if the clock advances", async () => {
+    const { pollRouterDeviceAndRoutes } = await import("./verify");
+    const originalNow = Date.now;
+    let tick = 0;
+    let calls = 0;
+    try {
+      Date.now = () => tick++;
+      const res = await pollRouterDeviceAndRoutes({
+        apiClient: {
+          getDevices: async () => {
+            calls++;
+            return [{ id: "dev-1", hostname: "router", tags: ["tag:docker"], isEphemeral: false }];
+          },
+        } as any,
+        tsHostname: "router",
+        routerTag: "tag:docker",
+        routesToCheck: ["10.128.0.0/24"],
+        timeoutMs: 0,
+        intervalMs: 1,
+      });
+      expect(calls).toBe(1);
+      expect(res.deviceFound).toBe(true);
+      expect(res.routerIsEphemeral).toBe(false);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("pollRouterDeviceAndRoutes reports extra advertised and enabled router routes", async () => {
     const { pollRouterDeviceAndRoutes } = await import("./verify");
     const fakeClient = {
