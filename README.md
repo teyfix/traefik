@@ -118,7 +118,9 @@ $EDITOR .env
 
 Complete the tailnet policy, route-approval, DNS, and reusable ephemeral key
 setup in [`compose/tailscale/README.md`](compose/tailscale/README.md). Store the
-key only in `env/.env.tailscale.local` with mode `0600`, never in `.env`.
+key only in `env/.env.tailscale.local` with mode `0600`, never in `.env`. Keep
+`TRAEFIK_IP`, `TS_TAILSCALE_IP`, and `TS_DNS_SERVER` distinct and inside
+`TS_INGRESS_SUBNET`; `task check:ingress-config` validates the rendered model.
 
 ### Existing checkout migration
 
@@ -164,13 +166,13 @@ When upgrading an existing checkout to the ingress-only architecture:
    After updating, restore if Git removed it:
    ```bash
    test -f .env || cp .local/.env.before-example-env-migration .env
-   docker compose config --quiet
+   task check:ingress-config
    ```
 
 ### 3. Render and start the environment
 
 ```bash
-docker compose config --quiet
+task check:ingress-config
 docker compose up -d
 ```
 
@@ -391,7 +393,8 @@ This stack exposes application services through a single ingress-only path:
   (`TRAEFIK_IP`) on `traefik_ingress`.
 - The Tailscale subnet router advertises solely the dedicated, explicit
   ingress /24 subnet (`TS_INGRESS_SUBNET`) containing Tailscale, CoreDNS, and
-  Traefik.
+  Traefik. Its connector uses the static `TS_TAILSCALE_IP`; the other two
+  static addresses are `TS_DNS_SERVER` and `TRAEFIK_IP`.
 - Backend services attach exclusively to the private, unadvertised
   `traefik_proxy` network. Traefik bridges incoming traffic from `traefik_ingress`
   to backends on `traefik_proxy`. Direct container routes and direct-container DNS

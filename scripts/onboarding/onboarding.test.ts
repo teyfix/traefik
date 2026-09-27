@@ -4,10 +4,12 @@ import { mkdtemp, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ipToInt,
   parseCidr,
   cidrsOverlap,
   deriveDnsResolverIp,
   deriveTraefikIp,
+  deriveTailscaleIp,
   is10Slash24,
   checkIngressSubnetOwnership,
   allocateIngressSubnet,
@@ -55,11 +57,62 @@ import {
 import { assertNoActiveNetworkConflicts, shouldRenewStoredAuthKey } from "./cli";
 
 describe("Network & CIDR calculation", () => {
+  test("matches the maintained node:net IPv4 boundary", () => {
+    expect(ipToInt("0.0.0.0")).toBe(0);
+    expect(ipToInt("10.10.10.2")).toBe(168430082);
+    expect(ipToInt("255.255.255.255")).toBe(0xffffffff);
+
+    for (const malformed of [
+      "",
+      "10.10.10",
+      "10.10.10.2.3",
+      "10.10.10.2 ",
+      " 10.10.10.2",
+      "10.10.10.2e0",
+      "10.10.10.+2",
+      "10.010.10.002",
+      "10.10.10.256",
+    ]) {
+      expect(() => ipToInt(malformed)).toThrow(/Invalid IPv4 address/);
+    }
+  });
+
   test("parses CIDR correctly", () => {
     const parsed = parseCidr("10.128.64.0/18");
     expect(parsed.ip).toBe("10.128.64.0");
     expect(parsed.prefix).toBe(18);
     expect(parsed.size).toBe(16384);
+    expect(parseCidr("0.0.0.0/0").cidr).toBe("0.0.0.0/0");
+    expect(parseCidr("255.255.255.255/32").cidr).toBe(
+      "255.255.255.255/32",
+    );
+  });
+
+  test("rejects partial, numeric-coercion, and whitespace CIDR prefixes", () => {
+    for (const malformed of [
+      "10.128.64.0/24foo",
+      "10.128.64.0/24 ",
+      "10.128.64.0/+24",
+      "10.128.64.0/24e0",
+      "10.128.64.0/024",
+    ]) {
+      expect(() => parseCidr(malformed)).toThrow(/Invalid prefix in CIDR/);
+    }
+    expect(() => parseCidr(" 10.128.64.0/24")).toThrow(
+      /Invalid IPv4 address/,
+    );
+    expect(() => parseCidr("10.128.064.0/24")).toThrow(
+      /Invalid IPv4 address/,
+    );
+  });
+
+  test("matches Docker IPAM by rejecting unmasked network CIDRs", () => {
+    expect(() => parseCidr("10.10.10.1/24")).toThrow(
+      "Invalid CIDR 10.10.10.1/24: network address has host bits set; expected 10.10.10.0/24.",
+    );
+    expect(() => parseCidr("10.10.10.255/24")).toThrow(
+      /expected 10\.10\.10\.0\/24/,
+    );
   });
 
   test("detects CIDR overlap accurately", () => {
@@ -159,6 +212,16 @@ describe("Network & CIDR calculation", () => {
     // Rejects invalid offsets
     expect(() => deriveTraefikIp("10.128.64.0/24", 0)).toThrow();
     expect(() => deriveTraefikIp("10.128.64.0/24", 255)).toThrow();
+  });
+
+  test("derives Tailscale IP from routed ingress subnet", () => {
+    expect(deriveTailscaleIp("10.128.64.0/24")).toBe("10.128.64.3");
+    expect(
+      deriveTailscaleIp("10.128.64.0/24", 3, "10.128.64.20"),
+    ).toBe("10.128.64.20");
+    expect(() =>
+      deriveTailscaleIp("10.128.64.0/24", 3, "10.128.65.3"),
+    ).toThrow(/outside routed subnet/);
   });
 
   test("validates is10Slash24 correctly", () => {
@@ -469,6 +532,7 @@ describe("Network & CIDR calculation", () => {
     expect(alloc.ingressSubnet).toBe("10.128.2.0/24");
     expect(alloc.dnsResolverIp).toBe("10.128.2.10");
     expect(alloc.traefikIp).toBe("10.128.2.2");
+    expect(alloc.tailscaleIp).toBe("10.128.2.3");
   });
 
   test("allocateIngressSubnet preserves unambiguousSubnet without self-conflict", () => {
@@ -480,6 +544,7 @@ describe("Network & CIDR calculation", () => {
     expect(alloc.ingressSubnet).toBe("10.128.64.0/24");
     expect(alloc.dnsResolverIp).toBe("10.128.64.10");
     expect(alloc.traefikIp).toBe("10.128.64.2");
+    expect(alloc.tailscaleIp).toBe("10.128.64.3");
   });
 
   test("allocateIngressSubnet rejects conflicting preferred subnet", () => {
@@ -492,7 +557,7 @@ describe("Network & CIDR calculation", () => {
     ).toThrow("conflicts with claimed route");
   });
 
-  test("allocateIngressSubnet throws when DNS resolver and Traefik IP coincide", () => {
+  test("allocateIngressSubnet rejects any duplicate static service addresses", () => {
     expect(() =>
       allocateIngressSubnet({
         claimedRoutes: [],
@@ -500,7 +565,14 @@ describe("Network & CIDR calculation", () => {
         existingDnsIp: "10.128.64.10",
         existingTraefikIp: "10.128.64.10",
       }),
-    ).toThrow("cannot coincide");
+    ).toThrow(/Static IP conflict/);
+    expect(() =>
+      allocateIngressSubnet({
+        claimedRoutes: [],
+        preferredSubnet: "10.128.64.0/24",
+        existingTailscaleIp: "10.128.64.2",
+      }),
+    ).toThrow(/TRAEFIK_IP .* and TS_TAILSCALE_IP .* both resolve/);
   });
 
   test("two hosts sharing default private proxy bridge but advertising distinct ingress subnets", () => {
@@ -516,6 +588,7 @@ describe("Network & CIDR calculation", () => {
 
     expect(allocHost2.ingressSubnet).toBe("10.128.2.0/24");
     expect(allocHost2.traefikIp).toBe("10.128.2.2");
+    expect(allocHost2.tailscaleIp).toBe("10.128.2.3");
     expect(allocHost2.dnsResolverIp).toBe("10.128.2.10");
 
     // Both hosts have 172.19.0.0/16 locally, but because it is unadvertised,
@@ -956,6 +1029,7 @@ TS_HOSTNAME="old-host"
       TS_INGRESS_SUBNET: process.env.TS_INGRESS_SUBNET,
       TS_ROUTES: process.env.TS_ROUTES,
       TS_DNS_SERVER: process.env.TS_DNS_SERVER,
+      TS_TAILSCALE_IP: process.env.TS_TAILSCALE_IP,
       TRAEFIK_IP: process.env.TRAEFIK_IP,
       TS_API_TOKEN: process.env.TS_API_TOKEN,
     };
@@ -964,6 +1038,7 @@ TS_HOSTNAME="old-host"
       TS_INGRESS_SUBNET: "10.128.0.0/24",
       TS_ROUTES: "10.128.0.0/24",
       TS_DNS_SERVER: "10.128.0.10",
+      TS_TAILSCALE_IP: "10.128.0.3",
       TRAEFIK_IP: "10.128.0.2",
     };
 
@@ -971,21 +1046,49 @@ TS_HOSTNAME="old-host"
       process.env.TS_INGRESS_SUBNET = "10.10.10.0/24";
       process.env.TS_ROUTES = "10.10.10.0/24";
       process.env.TS_DNS_SERVER = "10.10.10.10";
+      process.env.TS_TAILSCALE_IP = "10.10.10.3";
       process.env.TRAEFIK_IP = "10.10.10.2";
       process.env.TS_API_TOKEN = "transient-api-token-must-not-reach-compose";
       await Bun.write(
         envPath,
-        "TS_INGRESS_SUBNET=10.10.10.0/24\nTS_ROUTES=10.10.10.0/24\nTS_DNS_SERVER=10.10.10.10\nTRAEFIK_IP=10.10.10.2\n",
+        "TS_INGRESS_SUBNET=10.10.10.0/24\nTS_ROUTES=10.10.10.0/24\nTS_DNS_SERVER=10.10.10.10\nTS_TAILSCALE_IP=10.10.10.3\nTRAEFIK_IP=10.10.10.2\n",
       );
       await mergeEnvFile(envPath, envUpdates);
 
       Bun.spawn = ((command: string[], options?: { env?: Record<string, string> }) => {
         composeCalls.push({ command, env: options?.env });
-        const stdout = command.includes("ps") ? "[]" : "";
+        const stdout = command.includes("config")
+          ? JSON.stringify({
+              networks: {
+                ingress: {
+                  ipam: { config: [{ subnet: options?.env?.TS_INGRESS_SUBNET }] },
+                },
+              },
+              services: {
+                traefik: {
+                  networks: {
+                    ingress: { ipv4_address: options?.env?.TRAEFIK_IP },
+                  },
+                },
+                tailscale: {
+                  networks: {
+                    ingress: { ipv4_address: options?.env?.TS_TAILSCALE_IP },
+                  },
+                },
+                coredns: {
+                  networks: {
+                    ingress: { ipv4_address: options?.env?.TS_DNS_SERVER },
+                  },
+                },
+              },
+            })
+          : command.includes("ps")
+            ? "[]"
+            : "";
         return {
           exited: Promise.resolve(0),
-          stdout: new Response(stdout),
-          stderr: new Response(""),
+          stdout: new Response(stdout).body!,
+          stderr: new Response("").body!,
         };
       }) as unknown as typeof Bun.spawn;
 
@@ -994,6 +1097,7 @@ TS_HOSTNAME="old-host"
       await exportCertsFromContainer(tempDirectory, envUpdates);
 
       expect(composeCalls.map((call) => call.command.slice(0, 3))).toEqual([
+        ["docker", "compose", "config"],
         ["docker", "compose", "up"],
         ["docker", "compose", "ps"],
         ["docker", "compose", "exec"],
@@ -1003,6 +1107,7 @@ TS_HOSTNAME="old-host"
         expect(call.env?.TS_INGRESS_SUBNET).toBe("10.128.0.0/24");
         expect(call.env?.TS_ROUTES).toBe("10.128.0.0/24");
         expect(call.env?.TS_DNS_SERVER).toBe("10.128.0.10");
+        expect(call.env?.TS_TAILSCALE_IP).toBe("10.128.0.3");
         expect(call.env?.TRAEFIK_IP).toBe("10.128.0.2");
         expect(call.env?.TS_API_TOKEN).toBeUndefined();
       }
@@ -1053,6 +1158,7 @@ KEEP_KEY="important_custom_setting"
     const updated = updateEnvContent(original, {
       TS_ROUTES: "10.128.64.0/24",
       TS_INGRESS_SUBNET: "10.128.64.0/24",
+      TS_TAILSCALE_IP: "10.128.64.3",
       TRAEFIK_IP: "10.128.64.2",
       TS_DNS_SERVER: "10.128.64.10",
     });
@@ -1064,6 +1170,7 @@ KEEP_KEY="important_custom_setting"
     expect(updated).not.toContain("172.19.0.0/16");
     expect(updated).toContain('TS_ROUTES="10.128.64.0/24"');
     expect(updated).toContain('TS_INGRESS_SUBNET="10.128.64.0/24"');
+    expect(updated).toContain('TS_TAILSCALE_IP="10.128.64.3"');
     expect(updated).toContain('KEEP_KEY="important_custom_setting"');
   });
 

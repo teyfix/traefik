@@ -1,4 +1,5 @@
 import { composeSubprocessEnv } from "./compose";
+import { renderAndValidateIngressConfig } from "./ingress-config";
 
 export interface ServiceStatus {
   name: string;
@@ -15,6 +16,8 @@ export async function startTraefikStack(
   extraEnv?: Record<string, string>,
 ): Promise<void> {
   if (dryRun) return;
+
+  await renderAndValidateIngressConfig(repoRoot, extraEnv);
 
   const proc = Bun.spawn(["docker", "compose", "up", "-d", "--remove-orphans"], {
     cwd: repoRoot,

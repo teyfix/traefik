@@ -316,6 +316,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     unambiguousSubnet,
     existingDnsIp: existingEnv.TS_DNS_SERVER,
     existingTraefikIp: existingEnv.TRAEFIK_IP,
+    existingTailscaleIp: existingEnv.TS_TAILSCALE_IP,
   });
 
   const resolvedSubnetInput = await resolveOptionValue({
@@ -353,11 +354,13 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
           unambiguousSubnet,
           existingDnsIp: existingEnv.TS_DNS_SERVER,
           existingTraefikIp: existingEnv.TRAEFIK_IP,
+          existingTailscaleIp: existingEnv.TS_TAILSCALE_IP,
         });
 
   const routedSubnet = finalAllocation.ingressSubnet;
   const dnsResolverIp = finalAllocation.dnsResolverIp;
   const traefikIp = finalAllocation.traefikIp;
+  const tailscaleIp = finalAllocation.tailscaleIp;
 
   // Check existing legacy and ingress networks on host
   const legacyServicesNet = dockerNetworks.find((n) => n.name === "tailscale_services");
@@ -438,6 +441,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
       `Advertised route:  ${routedSubnet}`,
       `DNS resolver IP:   ${dnsResolverIp}`,
       `Traefik IP:        ${traefikIp}`,
+      `Tailscale IP:      ${tailscaleIp}`,
       `Private DNS zone:  ${dnsZonePlan}`,
       `Router tag:        ${resolvedTag}`,
       `Router hostname:   ${resolvedTsHostname}`,
@@ -536,6 +540,7 @@ export async function runOnboardingCli(rawArgs: string[] = process.argv.slice(2)
     TS_HOSTNAME: resolvedTsHostname,
     TS_ROUTES: routedSubnet,
     TS_INGRESS_SUBNET: routedSubnet,
+    TS_TAILSCALE_IP: tailscaleIp,
     TS_DNS_SERVER: dnsResolverIp,
     TRAEFIK_IP: traefikIp,
     TAIL_DOMAIN: finalZone,

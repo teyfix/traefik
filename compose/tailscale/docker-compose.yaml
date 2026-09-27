@@ -31,7 +31,8 @@ services:
       - ${PWD}/compose/tailscale/entrypoint.sh:/usr/local/bin/tailscale-entrypoint.sh:ro
       - ${PWD}/compose/tailscale/healthcheck.sh:/usr/local/bin/tailscale-healthcheck.sh:ro
     networks:
-      - ingress
+      ingress:
+        ipv4_address: ${TS_TAILSCALE_IP:?}
     cap_add:
       - NET_ADMIN
       - NET_RAW
