@@ -5,10 +5,15 @@ function renderedConfig(addresses?: Partial<{
   traefik: string;
   tailscale: string;
   coredns: string;
+  subnet: string;
 }>) {
   return {
     networks: {
-      ingress: { ipam: { config: [{ subnet: "10.128.0.0/24" }] } },
+      ingress: {
+        ipam: {
+          config: [{ subnet: addresses?.subnet ?? "10.128.0.0/24" }],
+        },
+      },
     },
     services: {
       traefik: {
@@ -53,7 +58,49 @@ describe("rendered ingress address validation", () => {
       assertRenderedIngressConfig(
         renderedConfig({ tailscale: "10.128.0.2" }),
       ),
-    ).toThrow(/TRAEFIK_IP and TS_TAILSCALE_IP both use 10\.128\.0\.2/);
+    ).toThrow(
+      /TRAEFIK_IP .* and TS_TAILSCALE_IP .* both resolve to 10\.128\.0\.2/,
+    );
+  });
+
+  test("compares address uniqueness by parsed numeric value", () => {
+    expect(() =>
+      assertRenderedIngressConfig(
+        renderedConfig({ tailscale: "10.128.000.002" }),
+      ),
+    ).toThrow(
+      /TRAEFIK_IP .* and TS_TAILSCALE_IP .* both resolve to 10\.128\.0\.2/,
+    );
+  });
+
+  test("rejects whitespace and JavaScript Number address forms", () => {
+    for (const malformed of [
+      "10.128.0.3 ",
+      " 10.128.0.3",
+      "10.128.0.3e0",
+      "10.128.0.+3",
+    ]) {
+      expect(() =>
+        assertRenderedIngressConfig(
+          renderedConfig({ tailscale: malformed }),
+        ),
+      ).toThrow(/TS_TAILSCALE_IP .* not a valid IPv4 address/);
+    }
+  });
+
+  test("rejects partial and malformed CIDR prefixes", () => {
+    for (const malformed of [
+      "10.128.0.0/24foo",
+      "10.128.0.0/24 ",
+      "10.128.0.0/+24",
+      "10.128.0.0/24e0",
+    ]) {
+      expect(() =>
+        assertRenderedIngressConfig(
+          renderedConfig({ subnet: malformed }),
+        ),
+      ).toThrow(/Invalid prefix in CIDR/);
+    }
   });
 
   test("rejects an address outside the ingress subnet", () => {

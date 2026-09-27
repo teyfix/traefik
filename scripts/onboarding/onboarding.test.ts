@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ipToInt,
   parseCidr,
   cidrsOverlap,
   deriveDnsResolverIp,
@@ -56,11 +57,41 @@ import {
 import { assertNoActiveNetworkConflicts, shouldRenewStoredAuthKey } from "./cli";
 
 describe("Network & CIDR calculation", () => {
+  test("parses only exact dotted-decimal IPv4 forms", () => {
+    expect(ipToInt("10.10.10.2")).toBe(168430082);
+    expect(ipToInt("10.010.10.002")).toBe(ipToInt("10.10.10.2"));
+
+    for (const malformed of [
+      "10.10.10.2 ",
+      " 10.10.10.2",
+      "10.10.10.2e0",
+      "10.10.10.+2",
+      "10.10.10.256",
+    ]) {
+      expect(() => ipToInt(malformed)).toThrow(/Invalid IPv4 address/);
+    }
+  });
+
   test("parses CIDR correctly", () => {
     const parsed = parseCidr("10.128.64.0/18");
     expect(parsed.ip).toBe("10.128.64.0");
     expect(parsed.prefix).toBe(18);
     expect(parsed.size).toBe(16384);
+  });
+
+  test("rejects partial, numeric-coercion, and whitespace CIDR prefixes", () => {
+    for (const malformed of [
+      "10.128.64.0/24foo",
+      "10.128.64.0/24 ",
+      "10.128.64.0/+24",
+      "10.128.64.0/24e0",
+      "10.128.64.0/024",
+    ]) {
+      expect(() => parseCidr(malformed)).toThrow(/Invalid prefix in CIDR/);
+    }
+    expect(() => parseCidr(" 10.128.64.0/24")).toThrow(
+      /Invalid IPv4 address/,
+    );
   });
 
   test("detects CIDR overlap accurately", () => {
@@ -520,7 +551,7 @@ describe("Network & CIDR calculation", () => {
         preferredSubnet: "10.128.64.0/24",
         existingTailscaleIp: "10.128.64.2",
       }),
-    ).toThrow(/TRAEFIK_IP and TS_TAILSCALE_IP/);
+    ).toThrow(/TRAEFIK_IP .* and TS_TAILSCALE_IP .* both resolve/);
   });
 
   test("two hosts sharing default private proxy bridge but advertising distinct ingress subnets", () => {

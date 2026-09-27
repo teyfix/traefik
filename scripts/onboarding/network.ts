@@ -8,19 +8,16 @@ export interface CidrRange {
 }
 
 export function ipToInt(ip: string): number {
-  const parts = ip.split(".").map(Number);
-  const p0 = parts[0];
-  const p1 = parts[1];
-  const p2 = parts[2];
-  const p3 = parts[3];
-  if (
-    parts.length !== 4 ||
-    p0 === undefined ||
-    p1 === undefined ||
-    p2 === undefined ||
-    p3 === undefined ||
-    parts.some((p) => isNaN(p) || p < 0 || p > 255)
-  ) {
+  if (!/^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(ip)) {
+    throw new Error(`Invalid IPv4 address: ${ip}`);
+  }
+  const [p0, p1, p2, p3] = ip.split(".").map(Number) as [
+    number,
+    number,
+    number,
+    number,
+  ];
+  if ([p0, p1, p2, p3].some((part) => part > 255)) {
     throw new Error(`Invalid IPv4 address: ${ip}`);
   }
   return ((p0 << 24) | (p1 << 16) | (p2 << 8) | p3) >>> 0;
@@ -36,15 +33,16 @@ export function intToIp(int: number): string {
 }
 
 export function parseCidr(cidr: string): CidrRange {
-  const parts = cidr.trim().split("/");
+  const parts = cidr.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
     throw new Error(`Invalid CIDR format (missing /): ${cidr}`);
   }
-  const ip = parts[0].trim();
-  const prefix = parseInt(parts[1].trim(), 10);
-  if (isNaN(prefix) || prefix < 0 || prefix > 32) {
+  const ip = parts[0];
+  const prefixText = parts[1];
+  if (!/^(?:0|[1-9]|[12][0-9]|3[0-2])$/.test(prefixText)) {
     throw new Error(`Invalid prefix in CIDR: ${cidr}`);
   }
+  const prefix = Number(prefixText);
 
   const baseInt = ipToInt(ip);
   const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
@@ -104,13 +102,15 @@ export function assertIngressStaticIpAllocation(
     ["TS_DNS_SERVER", allocation.dnsResolverIp],
   ] as const;
 
-  for (const [name, ip] of entries) {
-    let value: number;
+  const parsedEntries = entries.map(([name, ip]) => {
     try {
-      value = ipToInt(ip);
+      return [name, ip, ipToInt(ip)] as const;
     } catch {
       throw new Error(`${name} (${ip || "missing"}) is not a valid IPv4 address.`);
     }
+  });
+
+  for (const [name, ip, value] of parsedEntries) {
     if (value < range.startInt || value > range.endInt) {
       throw new Error(`${name} (${ip}) is outside TS_INGRESS_SUBNET (${range.cidr}).`);
     }
@@ -119,13 +119,15 @@ export function assertIngressStaticIpAllocation(
     }
   }
 
-  const byAddress = new Map<string, string>();
-  for (const [name, ip] of entries) {
-    const previous = byAddress.get(ip);
+  const byAddress = new Map<number, readonly [string, string]>();
+  for (const [name, ip, value] of parsedEntries) {
+    const previous = byAddress.get(value);
     if (previous) {
-      throw new Error(`Static IP conflict: ${previous} and ${name} both use ${ip}.`);
+      throw new Error(
+        `Static IP conflict: ${previous[0]} (${previous[1]}) and ${name} (${ip}) both resolve to ${intToIp(value)}.`,
+      );
     }
-    byAddress.set(ip, name);
+    byAddress.set(value, [name, ip]);
   }
 }
 
