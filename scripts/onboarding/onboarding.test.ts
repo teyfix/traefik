@@ -59,13 +59,13 @@ import { assertNoActiveNetworkConflicts, shouldRenewStoredAuthKey } from "./cli"
 describe("Network & CIDR calculation", () => {
   test("parses only exact dotted-decimal IPv4 forms", () => {
     expect(ipToInt("10.10.10.2")).toBe(168430082);
-    expect(ipToInt("10.010.10.002")).toBe(ipToInt("10.10.10.2"));
 
     for (const malformed of [
       "10.10.10.2 ",
       " 10.10.10.2",
       "10.10.10.2e0",
       "10.10.10.+2",
+      "10.010.10.002",
       "10.10.10.256",
     ]) {
       expect(() => ipToInt(malformed)).toThrow(/Invalid IPv4 address/);
@@ -90,6 +90,9 @@ describe("Network & CIDR calculation", () => {
       expect(() => parseCidr(malformed)).toThrow(/Invalid prefix in CIDR/);
     }
     expect(() => parseCidr(" 10.128.64.0/24")).toThrow(
+      /Invalid IPv4 address/,
+    );
+    expect(() => parseCidr("10.128.064.0/24")).toThrow(
       /Invalid IPv4 address/,
     );
   });

@@ -63,14 +63,20 @@ describe("rendered ingress address validation", () => {
     );
   });
 
-  test("compares address uniqueness by parsed numeric value", () => {
+  test("rejects leading-zero service IP octets", () => {
     expect(() =>
       assertRenderedIngressConfig(
-        renderedConfig({ tailscale: "10.128.000.002" }),
+        renderedConfig({ tailscale: "10.128.000.003" }),
       ),
-    ).toThrow(
-      /TRAEFIK_IP .* and TS_TAILSCALE_IP .* both resolve to 10\.128\.0\.2/,
-    );
+    ).toThrow(/TS_TAILSCALE_IP .* not a valid IPv4 address/);
+  });
+
+  test("rejects leading-zero ingress subnet octets", () => {
+    expect(() =>
+      assertRenderedIngressConfig(
+        renderedConfig({ subnet: "10.128.000.0/24" }),
+      ),
+    ).toThrow(/Invalid IPv4 address/);
   });
 
   test("rejects whitespace and JavaScript Number address forms", () => {

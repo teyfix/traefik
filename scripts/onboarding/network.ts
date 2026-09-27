@@ -8,7 +8,7 @@ export interface CidrRange {
 }
 
 export function ipToInt(ip: string): number {
-  if (!/^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(ip)) {
+  if (!/^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$/.test(ip)) {
     throw new Error(`Invalid IPv4 address: ${ip}`);
   }
   const [p0, p1, p2, p3] = ip.split(".").map(Number) as [
