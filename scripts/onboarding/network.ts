@@ -82,6 +82,89 @@ export function isIpInCidr(ip: string, cidr: string): boolean {
   }
 }
 
+export interface IngressStaticIpAllocation {
+  traefikIp: string;
+  tailscaleIp: string;
+  dnsResolverIp: string;
+}
+
+/**
+ * Requires every ingress service address to be a distinct, usable host address
+ * in the configured subnet. This is shared by onboarding and rendered Compose
+ * validation so a bad allocation fails before any service is recreated.
+ */
+export function assertIngressStaticIpAllocation(
+  ingressSubnet: string,
+  allocation: IngressStaticIpAllocation,
+): void {
+  const range = parseCidr(ingressSubnet);
+  const entries = [
+    ["TRAEFIK_IP", allocation.traefikIp],
+    ["TS_TAILSCALE_IP", allocation.tailscaleIp],
+    ["TS_DNS_SERVER", allocation.dnsResolverIp],
+  ] as const;
+
+  for (const [name, ip] of entries) {
+    let value: number;
+    try {
+      value = ipToInt(ip);
+    } catch {
+      throw new Error(`${name} (${ip || "missing"}) is not a valid IPv4 address.`);
+    }
+    if (value < range.startInt || value > range.endInt) {
+      throw new Error(`${name} (${ip}) is outside TS_INGRESS_SUBNET (${range.cidr}).`);
+    }
+    if (value === range.startInt || value === range.endInt) {
+      throw new Error(`${name} (${ip}) is not a usable host address in TS_INGRESS_SUBNET (${range.cidr}).`);
+    }
+  }
+
+  const byAddress = new Map<string, string>();
+  for (const [name, ip] of entries) {
+    const previous = byAddress.get(ip);
+    if (previous) {
+      throw new Error(`Static IP conflict: ${previous} and ${name} both use ${ip}.`);
+    }
+    byAddress.set(ip, name);
+  }
+}
+
+function deriveIngressServiceIp(
+  routedSubnetCidr: string,
+  offset: number,
+  serviceName: string,
+  existingIp?: string,
+): string {
+  const range = parseCidr(routedSubnetCidr);
+  if (range.size < 4) {
+    throw new Error(`Routed subnet ${routedSubnetCidr} is too small for ${serviceName}.`);
+  }
+
+  if (existingIp !== undefined) {
+    let existingValue: number;
+    try {
+      existingValue = ipToInt(existingIp);
+    } catch {
+      throw new Error(`${serviceName} (${existingIp || "missing"}) is not a valid IPv4 address.`);
+    }
+    if (existingValue < range.startInt || existingValue > range.endInt) {
+      throw new Error(`${serviceName} (${existingIp}) is outside routed subnet ${range.cidr}.`);
+    }
+    if (existingValue === range.startInt || existingValue === range.endInt) {
+      throw new Error(`${serviceName} (${existingIp}) is not a usable host address in routed subnet ${range.cidr}.`);
+    }
+    return existingIp;
+  }
+
+  if (offset <= 0 || offset >= range.size - 1) {
+    throw new Error(
+      `Offset ${offset} is outside the usable host range for subnet ${routedSubnetCidr} (size ${range.size})`,
+    );
+  }
+
+  return intToIp((range.startInt + offset) >>> 0);
+}
+
 /**
  * Calculates a stable DNS resolver IPv4 address belonging to the routed subnet.
  * Acceptance criteria:
@@ -95,26 +178,12 @@ export function deriveDnsResolverIp(
   offset = 10,
   existingIp?: string,
 ): string {
-  const range = parseCidr(routedSubnetCidr);
-  if (range.size < 4) {
-    throw new Error(`Routed subnet ${routedSubnetCidr} is too small for a DNS resolver.`);
-  }
-
-  if (existingIp && isIpInCidr(existingIp, routedSubnetCidr)) {
-    const existingVal = ipToInt(existingIp);
-    if (existingVal !== range.startInt && existingVal !== range.endInt) {
-      return existingIp;
-    }
-  }
-
-  if (offset <= 0 || offset >= range.size - 1) {
-    throw new Error(
-      `Offset ${offset} is outside the usable host range for subnet ${routedSubnetCidr} (size ${range.size})`,
-    );
-  }
-
-  const resolverInt = (range.startInt + offset) >>> 0;
-  return intToIp(resolverInt);
+  return deriveIngressServiceIp(
+    routedSubnetCidr,
+    offset,
+    "TS_DNS_SERVER",
+    existingIp,
+  );
 }
 
 /**
@@ -125,26 +194,21 @@ export function deriveTraefikIp(
   offset = 2,
   existingIp?: string,
 ): string {
-  const range = parseCidr(routedSubnetCidr);
-  if (range.size < 4) {
-    throw new Error(`Routed subnet ${routedSubnetCidr} is too small for a Traefik IP.`);
-  }
+  return deriveIngressServiceIp(routedSubnetCidr, offset, "TRAEFIK_IP", existingIp);
+}
 
-  if (existingIp && isIpInCidr(existingIp, routedSubnetCidr)) {
-    const existingVal = ipToInt(existingIp);
-    if (existingVal !== range.startInt && existingVal !== range.endInt) {
-      return existingIp;
-    }
-  }
-
-  if (offset <= 0 || offset >= range.size - 1) {
-    throw new Error(
-      `Offset ${offset} is outside the usable host range for subnet ${routedSubnetCidr} (size ${range.size})`,
-    );
-  }
-
-  const traefikInt = (range.startInt + offset) >>> 0;
-  return intToIp(traefikInt);
+/** Calculates a stable Tailscale connector address in the ingress subnet. */
+export function deriveTailscaleIp(
+  routedSubnetCidr: string,
+  offset = 3,
+  existingIp?: string,
+): string {
+  return deriveIngressServiceIp(
+    routedSubnetCidr,
+    offset,
+    "TS_TAILSCALE_IP",
+    existingIp,
+  );
 }
 
 /**
@@ -270,6 +334,7 @@ export interface IngressSubnetAllocation {
   ingressSubnet: string;
   dnsResolverIp: string;
   traefikIp: string;
+  tailscaleIp: string;
 }
 
 /**
@@ -282,18 +347,27 @@ export function allocateIngressSubnet(params: {
   unambiguousSubnet?: string;
   existingDnsIp?: string;
   existingTraefikIp?: string;
+  existingTailscaleIp?: string;
 }): IngressSubnetAllocation {
-  const { claimedRoutes, preferredSubnet, unambiguousSubnet, existingDnsIp, existingTraefikIp } = params;
+  const {
+    claimedRoutes,
+    preferredSubnet,
+    unambiguousSubnet,
+    existingDnsIp,
+    existingTraefikIp,
+    existingTailscaleIp,
+  } = params;
 
   function finalizeAllocation(subnet: string): IngressSubnetAllocation {
     const dnsResolverIp = deriveDnsResolverIp(subnet, 10, existingDnsIp);
     const traefikIp = deriveTraefikIp(subnet, 2, existingTraefikIp);
-    if (dnsResolverIp === traefikIp) {
-      throw new Error(
-        `Static IP conflict: DNS resolver IP (${dnsResolverIp}) and Traefik IP (${traefikIp}) cannot coincide. Please check configuration.`,
-      );
-    }
-    return { ingressSubnet: subnet, dnsResolverIp, traefikIp };
+    const tailscaleIp = deriveTailscaleIp(subnet, 3, existingTailscaleIp);
+    assertIngressStaticIpAllocation(subnet, {
+      dnsResolverIp,
+      traefikIp,
+      tailscaleIp,
+    });
+    return { ingressSubnet: subnet, dnsResolverIp, traefikIp, tailscaleIp };
   }
 
   if (preferredSubnet && preferredSubnet !== "auto") {

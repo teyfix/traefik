@@ -79,12 +79,16 @@ TAIL_DOMAIN=dev.example.test
 TS_INGRESS_SUBNET=10.10.10.0/24
 TS_ROUTES=10.10.10.0/24
 TRAEFIK_IP=10.10.10.2
+TS_TAILSCALE_IP=10.10.10.3
 TS_DNS_SERVER=10.10.10.10
 TS_HOSTNAME=docker-subnet-router
 TS_FORWARD_MSS=1160
 ```
 
 - `TS_INGRESS_SUBNET` contains only Tailscale, CoreDNS, and Traefik.
+- `TRAEFIK_IP`, `TS_TAILSCALE_IP`, and `TS_DNS_SERVER` are distinct usable
+  addresses inside that subnet. Keeping the connector static prevents Docker
+  startup order from assigning it an address reserved for Traefik or CoreDNS.
 - Application backend containers remain isolated on `traefik_proxy`, which is never advertised to Tailscale.
 
 Traefik's host-published ports bind only to `127.0.0.1`, so they are available
@@ -259,13 +263,22 @@ render and start the stack:
 ```bash
 cp .example.env .env
 $EDITOR .env
-docker compose config
+task check:ingress-config
 docker compose up -d
 ```
 
 This starts the edge, observability, Tailscale, and CoreDNS services together.
 The equivalent Task command is `task up`; use `task down` to stop the complete
-stack while preserving its volumes.
+stack while preserving its volumes. Both `task up` and onboarding validate the
+rendered Compose addresses before starting services. Missing addresses,
+duplicates, network/broadcast addresses, and addresses outside
+`TS_INGRESS_SUBNET` fail before Compose mutates a service.
+
+Repository maintainers can prove the Docker address contract without touching
+the live stack by running `bun scripts/check-ingress-restart-order.ts`. It
+creates a uniquely named disposable bridge and three throwaway containers,
+checks all six creation orders, and removes those exact resources afterward.
+It does not run `docker compose up` or `down`.
 
 Do not accept local `BackendState=Running` alone as proof of recovery. Confirm
 the hostname/tag in the Tailnet device API, require `isEphemeral: true`, and
@@ -421,8 +434,12 @@ earlier ingress configurations to the single ingress /24 architecture:
 
 3. **Single routed ingress subnet**:
    Update `.env` to advertise solely `TS_INGRESS_SUBNET` (e.g. `10.10.10.0/24`)
-   as `TS_ROUTES`, with static IPs for `TS_DNS_SERVER` and `TRAEFIK_IP`. Application
-   backends remain on the private, unadvertised `traefik_proxy` network.
+   as `TS_ROUTES`, with distinct static IPs for `TRAEFIK_IP`,
+   `TS_TAILSCALE_IP`, and `TS_DNS_SERVER`. Application backends remain on the
+   private, unadvertised `traefik_proxy` network. Validate the rendered model
+   with `task check:ingress-config` before a serial host owner recreates the
+   connector. Recreating the container retains the named `tailscale` volume;
+   do not remove that volume or reset the device as part of this address change.
 
 ### Existing `teyfix-router` identity
 

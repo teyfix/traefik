@@ -6,6 +6,10 @@ tasks:
       - bun run typecheck
       - bun test
       - bun run check:agent-rules
+  check:ingress-config:
+    desc: Renders Compose and validates distinct static ingress service addresses
+    cmds:
+      - bun scripts/check-ingress-config.ts
   onboard:
     desc: Runs the idempotent Traefik/Tailscale onboarding CLI
     cmds:
@@ -13,6 +17,7 @@ tasks:
   up:
     desc: Starts or recreates all services
     cmds:
+      - task: check:ingress-config
       - docker compose up -d --force-recreate --remove-orphans {{.CLI_ARGS}}
   down:
     desc: Stops all services while preserving volumes
