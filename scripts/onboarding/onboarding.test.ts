@@ -57,10 +57,15 @@ import {
 import { assertNoActiveNetworkConflicts, shouldRenewStoredAuthKey } from "./cli";
 
 describe("Network & CIDR calculation", () => {
-  test("parses only exact dotted-decimal IPv4 forms", () => {
+  test("matches the maintained node:net IPv4 boundary", () => {
+    expect(ipToInt("0.0.0.0")).toBe(0);
     expect(ipToInt("10.10.10.2")).toBe(168430082);
+    expect(ipToInt("255.255.255.255")).toBe(0xffffffff);
 
     for (const malformed of [
+      "",
+      "10.10.10",
+      "10.10.10.2.3",
       "10.10.10.2 ",
       " 10.10.10.2",
       "10.10.10.2e0",
@@ -77,6 +82,10 @@ describe("Network & CIDR calculation", () => {
     expect(parsed.ip).toBe("10.128.64.0");
     expect(parsed.prefix).toBe(18);
     expect(parsed.size).toBe(16384);
+    expect(parseCidr("0.0.0.0/0").cidr).toBe("0.0.0.0/0");
+    expect(parseCidr("255.255.255.255/32").cidr).toBe(
+      "255.255.255.255/32",
+    );
   });
 
   test("rejects partial, numeric-coercion, and whitespace CIDR prefixes", () => {
@@ -94,6 +103,15 @@ describe("Network & CIDR calculation", () => {
     );
     expect(() => parseCidr("10.128.064.0/24")).toThrow(
       /Invalid IPv4 address/,
+    );
+  });
+
+  test("matches Docker IPAM by rejecting unmasked network CIDRs", () => {
+    expect(() => parseCidr("10.10.10.1/24")).toThrow(
+      "Invalid CIDR 10.10.10.1/24: network address has host bits set; expected 10.10.10.0/24.",
+    );
+    expect(() => parseCidr("10.10.10.255/24")).toThrow(
+      /expected 10\.10\.10\.0\/24/,
     );
   });
 

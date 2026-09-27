@@ -109,6 +109,16 @@ describe("rendered ingress address validation", () => {
     }
   });
 
+  test("rejects host-bit ingress subnets with the Docker-expected CIDR", () => {
+    expect(() =>
+      assertRenderedIngressConfig(
+        renderedConfig({ subnet: "10.128.0.1/24" }),
+      ),
+    ).toThrow(
+      "Invalid CIDR 10.128.0.1/24: network address has host bits set; expected 10.128.0.0/24.",
+    );
+  });
+
   test("rejects an address outside the ingress subnet", () => {
     expect(() =>
       assertRenderedIngressConfig(

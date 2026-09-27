@@ -24,6 +24,8 @@ jobs:
         run: bun test
       - name: Validate rendered ingress addresses
         run: bun scripts/check-ingress-config.ts --env-file .example.env
+      - name: Reject invalid rendered ingress addresses
+        run: bun scripts/check-ingress-invalid-configs.ts --env-file .example.env
       - name: Prove ingress addresses across recreation orders
         run: bun scripts/check-ingress-restart-order.ts
       - name: Check current agent rules

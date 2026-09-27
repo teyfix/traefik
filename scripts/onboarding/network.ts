@@ -1,3 +1,5 @@
+import { isIPv4 } from "node:net";
+
 export interface CidrRange {
   cidr: string;
   ip: string;
@@ -8,7 +10,7 @@ export interface CidrRange {
 }
 
 export function ipToInt(ip: string): number {
-  if (!/^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$/.test(ip)) {
+  if (!isIPv4(ip)) {
     throw new Error(`Invalid IPv4 address: ${ip}`);
   }
   const [p0, p1, p2, p3] = ip.split(".").map(Number) as [
@@ -47,6 +49,11 @@ export function parseCidr(cidr: string): CidrRange {
   const baseInt = ipToInt(ip);
   const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
   const startInt = (baseInt & mask) >>> 0;
+  if (baseInt !== startInt) {
+    throw new Error(
+      `Invalid CIDR ${cidr}: network address has host bits set; expected ${intToIp(startInt)}/${prefix}.`,
+    );
+  }
   const size = Math.pow(2, 32 - prefix);
   const endInt = (startInt + size - 1) >>> 0;
 
