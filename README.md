@@ -243,6 +243,15 @@ DNS zones, and direct routes (such as `tailscale_services` or `DIRECT_DOMAIN`)
 are eliminated; all traffic enters through Traefik for centralized TLS termination,
 routing, and access control.
 
+A container on the same host that must call one of Traefik's HTTPS routes can join
+`traefik_proxy` and set `TRAEFIK_PROXY_ROUTE_ALIAS` in this host's ignored `.env`
+to that route's exact hostname. Docker DNS then resolves that name to Traefik's
+proxy-network interface. The existing `traefik.docker.local` alias remains
+available. The alias defaults to `TRAEFIK_DOMAIN` and changes only this host's
+private Docker DNS; remote hosts continue to use their tailnet DNS. Keep the
+container off `traefik_ingress`, and verify the route with normal TLS from the
+calling container before changing its endpoint configuration.
+
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
 You can run services like PostgreSQL behind Traefik using TCP with TLS
