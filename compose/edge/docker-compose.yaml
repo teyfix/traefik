@@ -68,6 +68,7 @@ services:
       proxy:
         aliases:
           - traefik.docker.local
+          - ${TRAEFIK_PROXY_ROUTE_ALIAS:-${TRAEFIK_DOMAIN:?}}
       ingress:
         ipv4_address: ${TRAEFIK_IP:?}
     ports:
