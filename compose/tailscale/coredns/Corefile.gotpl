@@ -16,4 +16,9 @@
     match ^(.*\.)?{{ $tailDomainEsc }}\.$
     rcode NOERROR
   }
+
+  template IN HTTPS {
+    match ^(.*\.)?{{ $tailDomainEsc }}\.$
+    rcode NOERROR
+  }
 }
