@@ -101,8 +101,8 @@ export function assertRouterIdentityPreflight(params: {
     message =
       `Existing router device '${params.tsHostname}' (${params.device.id}) is non-ephemeral. ` +
         "A normal run stops before policy, network, credential, state, container, or split-DNS mutations. " +
-        "Back up the task-owned 'traefik_tailscale' state volume; stop/remove only the router container; retire the old Tailnet device; " +
-        "reset only the router state volume when that reset is separately authorized; then rerun onboarding with the stored reusable key. " +
+        "Back up the task-owned '.state/tailscale/data/' directory; stop/remove only the router container; retire the old Tailnet device; " +
+        "reset only the router state directory when that reset is separately authorized; then rerun onboarding with the stored reusable key. " +
         "Ordinary restarts retain router state. Do not change CA/ACME state, traefik_proxy, or application backends.";
   } else {
     message =
@@ -126,7 +126,7 @@ export async function ensureRouterAuthKey(params: {
 }): Promise<{ authKey: string; generated: boolean; needed: boolean; expiresAt?: string; warning?: string }> {
   const { client, existingKey, routerTag, hostname, hasLocalState, forceRotate, dryRun } = params;
 
-  // The key remains available to containerboot even when volume state exists.
+  // The key remains available to containerboot even when persistent state exists.
   // Compose deliberately uses TS_AUTH_ONCE=false: stale state from an evicted
   // ephemeral node can still report Running, so startup must force auth.
   if (existingKey && !forceRotate) {
@@ -244,8 +244,8 @@ export function assertSplitDnsPrerequisites(params: SplitDnsPrerequisites): void
     if (params.routerIsEphemeral === false) {
       throw new Error(
         `Cannot publish split DNS: Router device '${params.tsHostname}' is non-ephemeral. ` +
-          "Existing split DNS configuration was preserved. Migration preflight: back up the task-owned 'traefik_tailscale' state volume; " +
-          "stop/remove only the router container; retire the old Tailnet device; reset only the router state volume when that reset is separately authorized; " +
+          "Existing split DNS configuration was preserved. Migration preflight: back up the task-owned '.state/tailscale/data/' directory; " +
+          "stop/remove only the router container; retire the old Tailnet device; reset only the router state directory when that reset is separately authorized; " +
           "then rerun onboarding with the stored reusable key. Ordinary restarts retain router state. Do not change CA/ACME state, traefik_proxy, or application backends.",
       );
     }

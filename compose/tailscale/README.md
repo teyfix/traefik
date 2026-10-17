@@ -226,7 +226,7 @@ The old key remains valid until its own expiry unless an administrator revokes
 it. This renewal requires an operator and API token; the setup is unattended
 only while the stored key remains valid.
 
-The `traefik_tailscale` volume preserves `tailscaled.state` across ordinary
+The `.state/tailscale/data/` directory preserves `tailscaled.state` across ordinary
 restarts. Tailscale normally removes an inactive ephemeral node 30–60 minutes
 after its last activity. Compose sets `TS_AUTH_ONCE=false` intentionally. With
 `true`, stale state from an evicted ephemeral node can report local `Running`
@@ -234,7 +234,7 @@ without a Tailnet API device. Forced auth on each container start keeps the same
 device ID during ordinary restarts, but uses the reusable key to create a new
 ephemeral device after eviction. `TS_HOSTNAME` remains stable; the Tailnet
 device ID and Tailscale IP can change after re-registration. Do not delete the
-state volume as part of an ordinary restart.
+state directory as part of an ordinary restart.
 
 The connector healthcheck requires both containerboot's local health endpoint
 and a running daemon whose own `Online` status is true. It excludes peer status:
@@ -250,9 +250,9 @@ Docker does not automatically restart unhealthy containers. Inspect the
 connector status and control-plane errors first. If its node identity is gone,
 verify the stored reusable key has not expired, then restart only the connector
 (`docker compose restart tailscale`) to force authentication while preserving
-the state volume. Confirm the Tailnet API identity, ephemeral flag, enabled
+the state directory. Confirm the Tailnet API identity, ephemeral flag, enabled
 route, and a remote client's DNS/HTTPS path afterward as described below. Do
-not reset the volume or publish DNS based only on container health.
+not reset the state directory or publish DNS based only on container health.
 
 ## Start and verify
 
@@ -269,7 +269,7 @@ docker compose up -d
 
 This starts the edge, observability, Tailscale, and CoreDNS services together.
 The equivalent Task command is `task up`; use `task down` to stop the complete
-stack while preserving its volumes. Both `task up` and onboarding validate the
+stack while preserving its state directories. Both `task up` and onboarding validate the
 rendered Compose addresses before starting services. Missing addresses,
 duplicates, network/broadcast addresses, and addresses outside
 `TS_INGRESS_SUBNET` fail before Compose mutates a service.
@@ -418,7 +418,7 @@ earlier ingress configurations to the single ingress /24 architecture:
    > are already absent and avoids
    > `docker compose` configuration parsing failures when legacy `.env` files
    > lack `TRAEFIK_IP`. The commands remove only the named legacy or conflicting
-   > network, preserving named volumes and unrelated networks such as
+   > network, preserving persistent state and unrelated networks such as
    > `traefik_proxy`.
 
    The CLI also checks the Compose ownership labels on existing
@@ -438,13 +438,13 @@ earlier ingress configurations to the single ingress /24 architecture:
    `TS_TAILSCALE_IP`, and `TS_DNS_SERVER`. Application backends remain on the
    private, unadvertised `traefik_proxy` network. Validate the rendered model
    with `task check:ingress-config` before a serial host owner recreates the
-   connector. Recreating the container retains the named `tailscale` volume;
-   do not remove that volume or reset the device as part of this address change.
+   connector. Recreating the container retains `.state/tailscale/data/`;
+   do not remove that directory or reset the device as part of this address change.
 
 ### Existing `teyfix-router` identity
 
 The current `teyfix-router` is confirmed ephemeral; preserve its persistent
-volume during ordinary upgrades and restarts. The CLI verifies this state from
+state directory during ordinary upgrades and restarts. The CLI verifies this state from
 the Tailnet API rather than assuming it from the stored reusable ephemeral auth
 key. Supplying such a key cannot convert a different, already-registered
 non-ephemeral identity, so a future false or missing API value still fails
@@ -454,21 +454,21 @@ When the API reports `isEphemeral: false`, first record the old device ID,
 routes, and approvals and confirm the stored reusable key, tag ownership,
 route auto-approval, and key expiry. Then plan a separately authorized outage:
 
-1. Make a fresh backup of the task-owned `traefik_tailscale` state volume for
+1. Make a fresh backup of the task-owned `.state/tailscale/data/` directory for
    configuration recovery and investigation. It cannot revive a device after
    that Tailnet identity is retired.
 2. Stop and remove only the `traefik_tailscale` router container.
 3. Retire only the old Tailnet device after matching its recorded hostname,
    tag, and device ID in the administration console.
 4. Only with separate authorization, reset only the backed-up router state
-   volume. Do not reset it during an ordinary restart or source upgrade.
+   directory. Do not reset it during an ordinary restart or source upgrade.
 5. Rerun onboarding with the stored reusable key and verify that the API reports
    a new `isEphemeral: true` device with the expected hostname, tag, and enabled
    ingress route before split DNS changes. Then verify DNS and HTTPS from
    another tailnet client.
 
 Those are manual, one-time cutover steps; the CLI does not retire Tailnet
-devices or reset the state volume. If the same separately authorized cutover
+devices or reset the state directory. If the same separately authorized cutover
 also retires the legacy `tailscale_services` network, first inspect its
 attachments and require them to be exactly the old task-owned router and
 CoreDNS containers. Stop/remove only those two containers, remove only that

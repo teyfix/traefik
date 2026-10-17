@@ -370,7 +370,7 @@ describe("Network & CIDR calculation", () => {
       expect(e.message).toContain("docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true;");
       expect(e.message).toContain("docker network rm tailscale_services");
       expect(e.message).toContain("rerun onboarding CLI to write configuration and start services");
-      expect(e.message).toContain("preserving named volumes and unrelated networks");
+      expect(e.message).toContain("preserving persistent state and unrelated networks");
       // Never use docker compose commands (which would fail during interpolation of TRAEFIK_IP:?)
       expect(e.message).not.toContain("docker compose");
       expect(e.message).not.toContain("docker volume");
@@ -397,7 +397,7 @@ describe("Network & CIDR calculation", () => {
       expect(e.message).toContain("docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true");
       expect(e.message).toContain("docker network rm traefik_ingress");
       expect(e.message).toContain("rerun onboarding");
-      expect(e.message).toContain("Named volumes and traefik_proxy are preserved");
+      expect(e.message).toContain("Persistent state and traefik_proxy are preserved");
       expect(e.message).not.toContain("docker compose");
       expect(e.message).not.toContain("docker volume");
     }
@@ -2147,7 +2147,7 @@ describe("Split DNS prerequisites and gating", () => {
         ...basePrereqs,
         routerIsEphemeral: false,
       }),
-    ).toThrow(/back up the task-owned 'traefik_tailscale' state volume/);
+    ).toThrow(/back up the task-owned '\.state\/tailscale\/data\/' directory/);
 
     expect(() =>
       assertSplitDnsPrerequisites({
@@ -2271,7 +2271,7 @@ describe("Router identity preflight", () => {
         device: { ...baseDevice, isEphemeral: false },
         tsHostname: "router",
       }),
-    ).toThrow(/A normal run stops before policy, network, credential, state, container, or split-DNS mutations.*Back up the task-owned 'traefik_tailscale' state volume/);
+    ).toThrow(/A normal run stops before policy, network, credential, state, container, or split-DNS mutations.*Back up the task-owned '\.state\/tailscale\/data\/' directory/);
   });
 
   test("rejects missing existing identity status before mutations", () => {

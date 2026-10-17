@@ -93,7 +93,7 @@ a preauthorized, tagged, reusable, ephemeral `TS_AUTHKEY` with the maximum
 90-day expiry and stores it atomically in gitignored
 `env/.env.tailscale.local` with mode `0600`. Compose reads that file directly;
 root `.env` and a root `.env.tailscale.local` used for operator testing are not
-production key storage. The persistent `traefik_tailscale` volume is preserved
+production key storage. The persistent `.state/tailscale/data/` directory is preserved
 across ordinary restarts. Renew the key before expiry with
 `TS_API_TOKEN="..." bun scripts/onboarding.ts --rotate-authkey`; keys cannot be
 extended beyond 90 days, so this creates a replacement rather than making the
@@ -136,7 +136,7 @@ When upgrading an existing checkout to the ingress-only architecture:
    docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true
    docker network rm traefik_ingress
    ```
-   Direct `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`. These commands remove only the named legacy or conflicting network; they preserve named volumes and unrelated networks such as `traefik_proxy`.
+   Direct `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`. These commands remove only the named legacy or conflicting network; they preserve persistent state and unrelated networks such as `traefik_proxy`.
 
 2. **Migrate network ownership labels safely**: The CLI detects matching
    `traefik_ingress` or `traefik_proxy` networks created by older direct Docker
@@ -456,6 +456,29 @@ certificate; trusting the private Step CA locally does not satisfy those checks.
 
 ---
 
+## Local container storage
+
+The central stack uses gitignored bind mounts under the project root:
+
+| Host directory | Container path | Contents |
+| --- | --- | --- |
+| `.state/stepca/data/` | `/home/step` | CA identity, keys, certificates, and database |
+| `.state/traefik/acme/` | `/acme` | ACME account and issued certificates |
+| `.state/tailscale/data/` | `/var/lib/tailscale` | Router identity and daemon state |
+
+These are runtime state, not reusable downloads or upstream response caches;
+none of the central services currently needs `.cache/`. Preserve these directories
+during ordinary restarts. The tracked `step/config/ca.json` remains the active CA
+configuration. New empty CA directories are owned by the image's `step` user
+before initialization. Host state must not be mounted into agents.
+
+Existing named-volume installations must stop all writers, copy `traefik_step`,
+`traefik_acme`, and `traefik_tailscale` to the corresponding directories above
+while preserving numeric ownership and permissions, and verify the copies before
+recreating the services. Remove only those old volumes after confirming that the
+replacement containers use the bind mounts. Do not start with empty directories
+when preserving an existing CA or Tailscale identity.
+
 ## 🧼 Cleanup
 
 ```bash
@@ -464,7 +487,9 @@ task down
 
 This stops the stack and removes orphan containers while preserving persistent
 Step CA, ACME, and Tailscale state. To deliberately delete that state, use
-`task purge` and confirm the destructive prompt.
+`task purge` and confirm the destructive prompt. It uses `sudo` to remove only
+the three state directories listed above, leaving `.cache/` untouched.
+`docker compose down -v` alone does not delete bind-mounted state.
 
 ---
 

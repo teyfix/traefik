@@ -20,7 +20,7 @@ tasks:
       - task: check:ingress-config
       - docker compose up -d --force-recreate --remove-orphans {{.CLI_ARGS}}
   down:
-    desc: Stops all services while preserving volumes
+    desc: Stops all services while preserving persistent state
     cmds:
       - docker compose down --remove-orphans {{.CLI_ARGS}}
   logs: docker compose logs --follow --tail 0 {{.CLI_ARGS}}
@@ -29,10 +29,11 @@ tasks:
     cmds:
       - task: up
   purge:
-    desc: Stops the stack and permanently removes all infrastructure volumes
+    desc: Stops the stack and permanently removes CA, ACME, and Tailscale state
     prompt: This permanently deletes the Step CA, ACME, and Tailscale state. Continue?
     cmds:
       - docker compose down --remove-orphans --volumes {{.CLI_ARGS}}
+      - sudo rm -rf -- '{{.ROOT_DIR}}/.state/stepca/data' '{{.ROOT_DIR}}/.state/traefik/acme' '{{.ROOT_DIR}}/.state/tailscale/data'
   certs:
     desc: Copies certs from container to host
     cmds:

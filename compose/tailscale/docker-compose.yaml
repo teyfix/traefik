@@ -5,9 +5,6 @@ x-healthcheck: &healthcheck
   start_period: 3s
   start_interval: 1s
 
-volumes:
-  tailscale:
-
 services:
   tailscale:
     container_name: traefik_tailscale
@@ -27,7 +24,7 @@ services:
       - path: ${PWD}/env/.env.tailscale.local
         required: false
     volumes:
-      - tailscale:/var/lib/tailscale
+      - ${PWD}/.state/tailscale/data:/var/lib/tailscale
       - ${PWD}/compose/tailscale/entrypoint.sh:/usr/local/bin/tailscale-entrypoint.sh:ro
       - ${PWD}/compose/tailscale/healthcheck.sh:/usr/local/bin/tailscale-healthcheck.sh:ro
     networks:

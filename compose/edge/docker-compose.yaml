@@ -5,10 +5,6 @@ x-healthcheck: &healthcheck
   start_period: 3s
   start_interval: 1s
 
-volumes:
-  step:
-  acme:
-
 services:
   stepca-init:
     container_name: traefik_stepca_init
@@ -20,14 +16,17 @@ services:
           cpus: "0.5"
           memory: 256M
     entrypoint: /bin/bash
-    command: /entrypoint.sh
+    # Docker creates an empty bind directory as root on a fresh checkout.
+    # Give the image's unprivileged user ownership before CA initialization.
+    user: root
+    command: ["-c", "chown step:step /home/step && exec su -s /bin/bash step -c '/bin/bash /entrypoint.sh'"]
     environment:
       - DOCKER_STEPCA_INIT_NAME
       - DOCKER_STEPCA_INIT_DNS_NAMES
       - DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT
       - DOCKER_STEPCA_INIT_ACME
     volumes:
-      - step:/home/step
+      - ${PWD}/.state/stepca/data:/home/step
 
   stepca:
     container_name: traefik_stepca
@@ -44,7 +43,7 @@ services:
       - DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT
       - DOCKER_STEPCA_INIT_ACME
     volumes:
-      - step:/home/step
+      - ${PWD}/.state/stepca/data:/home/step
       - ../../step/config/ca.json:/home/step/config/ca.json:ro
     network_mode: host
     depends_on:
@@ -94,8 +93,8 @@ services:
       - "traefik.http.routers.${TRAEFIK_PREFIX}_self.tls.certResolver=${TRAEFIK_CERT_RESOLVER}"
       - "traefik.http.routers.${TRAEFIK_PREFIX}_self.service=${TRAEFIK_PREFIX}_self"
     volumes:
-      - step:/home/step
-      - acme:/acme
+      - ${PWD}/.state/stepca/data:/home/step
+      - ${PWD}/.state/traefik/acme:/acme
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ../../traefik/traefik-static.yaml:/etc/traefik/traefik-static.yaml:ro
     environment:

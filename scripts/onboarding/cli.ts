@@ -90,7 +90,7 @@ export function assertNoActiveNetworkConflicts(
     if (hasContainers) {
       const msg =
         `Existing legacy Docker network 'tailscale_services' (${legacyServicesNet.subnets[0] || "unknown"}) has active containers. ` +
-        "Run 'docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true; docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services. This removes only the legacy network, preserving named volumes and unrelated networks (e.g. traefik_proxy).";
+        "Run 'docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true; docker network rm tailscale_services' then rerun onboarding CLI to write configuration and start services. This removes only the legacy network, preserving persistent state and unrelated networks (e.g. traefik_proxy).";
       if (dryRun) {
         warnings.push(msg);
       } else {
@@ -115,7 +115,7 @@ export function assertNoActiveNetworkConflicts(
         : `uses '${ingressNet.subnets[0]}' instead of '${routedSubnet}'`;
       const msg =
         `Existing Docker network 'traefik_ingress' ${reason} and has active containers. ` +
-        "Inspect attachments with 'docker network inspect traefik_ingress'. Stop/remove only this stack's attached containers with 'docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true', verify no unrelated attachments remain, then run 'docker network rm traefik_ingress' and rerun onboarding. Named volumes and traefik_proxy are preserved.";
+        "Inspect attachments with 'docker network inspect traefik_ingress'. Stop/remove only this stack's attached containers with 'docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true', verify no unrelated attachments remain, then run 'docker network rm traefik_ingress' and rerun onboarding. Persistent state and traefik_proxy are preserved.";
       if (dryRun) {
         warnings.push(msg);
       } else {
