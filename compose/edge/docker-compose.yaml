@@ -97,6 +97,10 @@ services:
       - ${PWD}/.state/traefik/acme:/acme
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ../../traefik/traefik-static.yaml:/etc/traefik/traefik-static.yaml:ro
+      - type: image
+        source: teyfix/sablier-traefik-plugin:1.4.0
+        target: /plugins-local
+        read_only: true
     environment:
       - LEGO_CA_CERTIFICATES=/home/step/certs/root_ca.crt
     depends_on:

@@ -20,6 +20,9 @@ entryPoints:
       tls:
         certResolver: stepca
     address: :443
+  # Private Docker-network entrypoint for cache misses that wake model runtimes.
+  upstreamwake:
+    address: :8088
   shared:
     address: :4040
 
@@ -36,3 +39,8 @@ certificatesResolvers:
       caServer: "https://host.docker.internal:9000/acme/acme/directory"
       httpChallenge:
         entryPoint: web
+
+experimental:
+  localPlugins:
+    sablier:
+      moduleName: github.com/sablierapp/sablier-traefik-plugin
