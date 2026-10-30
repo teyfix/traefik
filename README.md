@@ -1,3 +1,8 @@
+---
+title: Shared local ingress, TLS, and tailnet DNS
+summary: Operate standalone Traefik, Step CA and Tailscale ingress and attach application projects with trusted HTTPS.
+---
+
 # Shared local ingress, TLS, and tailnet DNS
 
 This repository provides reusable development ingress for multiple projects:
@@ -251,6 +256,51 @@ available. The alias defaults to `TRAEFIK_DOMAIN` and changes only this host's
 private Docker DNS; remote hosts continue to use their tailnet DNS. Keep the
 container off `traefik_ingress`, and verify the route with normal TLS from the
 calling container before changing its endpoint configuration.
+
+For several exact hostnames, use a native Compose override supplied by the
+project that owns those routes. That project can generate the alias list from
+its canonical enabled routes instead of copying hostnames into each consumer
+or this ingress repository. The override has this shape:
+
+```yaml
+services:
+  traefik:
+    networks:
+      proxy:
+        aliases:
+          - api.project.dev.example.test
+          - assets.project.dev.example.test
+```
+
+Set standard `COMPOSE_FILE` in this host's ignored `.env` to load the base and
+the supplied override (colon-separated on Linux):
+
+```dotenv
+COMPOSE_FILE="docker-compose.yaml:/absolute/path/to/routes.compose.yaml"
+```
+
+Compose appends these aliases to `traefik.docker.local` and
+`TRAEFIK_PROXY_ROUTE_ALIAS`; existing single-host configurations keep working.
+The supplied file must exist before rendering or starting the stack. After
+regenerating it, apply only the Traefik service from this repository root:
+
+```sh
+task check:ingress-config
+docker compose up -d --no-deps traefik
+```
+
+```mermaid
+flowchart LR
+  R["Route owner's enabled hostnames"] --> O["Generated Compose aliases"]
+  O --> T["Traefik on traefik_proxy"]
+  C["Consumer on traefik_proxy"] -->|"Docker DNS and trusted HTTPS"| T
+  T --> B["Route owner's backend"]
+```
+
+Docker DNS aliases do not distribute certificate trust. Mount only the exported
+public `certs/root_ca.crt` into consumers and configure their native trust store
+(for Bun, `NODE_EXTRA_CA_CERTS` pointing to that read-only mount). Verify normal
+HTTPS from the calling container after applying aliases.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 
