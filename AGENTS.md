@@ -1,5 +1,6 @@
 ---
 title: Traefik Agent Rule Map
+summary: Preserve the public standalone ingress distribution and route assigned infrastructure or onboarding work.
 description: Entry point for agents configuring shared ingress or onboarding a developer.
 ---
 
@@ -7,6 +8,14 @@ description: Entry point for agents configuring shared ingress or onboarding a d
 
 The explicit user request and its owning GitHub issue define the authorized
 target and scope. Preserve existing edits and state. Commit only when authorized.
+
+The complete MIT-licensed ingress stack is a public, standalone distribution.
+Compose definitions, onboarding, configuration templates and documentation MUST
+remain publicly usable without `teyfix/upstream`. An operator's configured
+instance may live elsewhere. Any consolidation into Containers must preserve
+this public contract, including a supported standalone reference stack; a
+private catalog cannot become a required dependency. Apply the shared
+[distribution boundary](/../memory/rules/architecture.md#repository-and-distribution-boundaries).
 
 When the user explicitly asks to start or resume onboarding, read
 `.agents/rules/onboarding.md` and the
