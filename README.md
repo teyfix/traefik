@@ -74,7 +74,7 @@ The public quickstart below still uses the supported standalone stack. The singl
 bun scripts/onboarding.ts --bundle-source /path/to/containers --domain dev.example.test
 ```
 
-Replace the example suffix with the authorized location. This requires Linux or the WSL Docker-host distro, Bun, Docker Engine, Buildx and Compose. The wrapper builds the native helper and bundle using the selected source, then delegates key/location input, allocation and setup to Go. Source is mounted read-only for helper builds; installation state and build caches stay in this checkout. `--install-dir /path/to/installation` selects a different fresh installation root.
+Replace the example suffix with the authorized location. This requires Linux or the WSL Docker-host distro, Bun, Docker Engine, Buildx and Compose. The wrapper builds the native helper and bundle using the selected source, then delegates key/location input, allocation and setup to Go. Source is mounted read-only for helper builds; installation state and build caches stay in this checkout. `--install-dir /path/to/installation` selects a different fresh installation root. Automation can supply `TS_API_KEY`, `TRAEFIK_INGRESS_DOMAIN` and `TRAEFIK_HOSTNAME` instead of prompts. The legacy `TRAEFIK_DOMAIN` means dashboard hostname and is not used as a bundle DNS suffix.
 
 ```mermaid
 flowchart LR

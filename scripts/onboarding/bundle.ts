@@ -57,8 +57,29 @@ async function run(
     stdout: "inherit",
     stderr: "inherit",
   });
-  const code = await child.exited;
-  if (code !== 0) throw new Error(`${command[0]} exited with status ${code}.`);
+  let interrupted = false;
+  const interrupt = () => {
+    interrupted = true;
+    child.kill("SIGINT");
+  };
+  const terminate = () => {
+    interrupted = true;
+    child.kill("SIGTERM");
+  };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", terminate);
+  try {
+    const code = await child.exited;
+    if (interrupted)
+      throw new Error(
+        "Onboarding interrupted; deployment selection unchanged.",
+      );
+    if (code !== 0)
+      throw new Error(`${command[0]} exited with status ${code}.`);
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", terminate);
+  }
 }
 
 /** Local source preview only: public helper/image downloads are not released yet. */
@@ -231,7 +252,7 @@ export async function runBundleOnboarding(
   if (process.geteuid?.() !== 0) {
     command.unshift(
       "sudo",
-      "--preserve-env=TS_API_KEY,TS_API_TOKEN,TRAEFIK_DOMAIN,TRAEFIK_HOSTNAME",
+      "--preserve-env=TS_API_KEY,TS_API_TOKEN,TRAEFIK_INGRESS_DOMAIN,TRAEFIK_HOSTNAME",
     );
   }
   await run(command, installation, { ...process.env, PWD: installation });

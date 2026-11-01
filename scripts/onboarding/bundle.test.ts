@@ -97,6 +97,11 @@ describe("Local bundle entrypoint", () => {
         expect(calls[0]!.args).toContain("CGO_ENABLED=0");
         const delegated = calls[2]!;
         expect(delegated.args).toContain("onboarding");
+        if (process.geteuid?.() !== 0) {
+          expect(delegated.args[1]).toBe(
+            "--preserve-env=TS_API_KEY,TS_API_TOKEN,TRAEFIK_INGRESS_DOMAIN,TRAEFIK_HOSTNAME",
+          );
+        }
         expect(delegated.args).toContain(join(f.installation, "traefik.yaml"));
         expect(delegated.args).toContain(
           join(f.installation, ".state/traefik/bundle.compose.yaml"),
@@ -198,6 +203,34 @@ describe("Local bundle entrypoint", () => {
       expect(
         existsSync(join(f.installation, ".state/traefik/bootstrap.json")),
       ).toBe(true);
+    } finally {
+      Bun.spawn = originalSpawn;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+  test("interruption cancels the child and never activates even if it exits zero", async () => {
+    const f = await fixture();
+    const originalSpawn = Bun.spawn;
+    const listeners = process.listenerCount("SIGINT");
+    const signals: string[] = [];
+    try {
+      let calls = 0;
+      Bun.spawn = (() => {
+        if (++calls === 3) queueMicrotask(() => process.emit("SIGINT"));
+        return {
+          exited: Promise.resolve(0),
+          kill: (signal: string) => signals.push(signal),
+        };
+      }) as unknown as typeof Bun.spawn;
+      await expect(
+        runBundleOnboarding(
+          ["--bundle-source", f.source, "--install-dir", f.installation],
+          f.installation,
+        ),
+      ).rejects.toThrow("interrupted");
+      expect(signals).toEqual(["SIGINT"]);
+      expect(existsSync(join(f.installation, ".env"))).toBe(false);
+      expect(process.listenerCount("SIGINT")).toBe(listeners);
     } finally {
       Bun.spawn = originalSpawn;
       await rm(f.root, { recursive: true, force: true });
