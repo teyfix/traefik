@@ -48,24 +48,94 @@ The checked-in `docker-compose.yaml` is the single-container default. Onboarding
 
 ## Publish an application route
 
-```sh
-docker run --rm --network traefik_proxy \
-  --label teyfix/traefik.auto=true traefik/whoami
+For an existing application, keep its image, private networks and other settings; add the external `traefik_proxy` network and opt into discovery. For a small standalone example, put this in `svc/whoami/compose.yaml`:
+
+```yaml
+services:
+  whoami:
+    image: traefik/whoami:v1.11.0
+    networks: [traefik_proxy]
+    labels:
+      teyfix/traefik.auto: "true"
+
+networks:
+  traefik_proxy:
+    external: true
 ```
 
-Use the selected `teyfix` Docker context for expansion. An explicit Docker socket or context can bypass it. The configured HTTP default uses a single exposed TCP port; ambiguous ports require an explicit selection:
+Include it from the application root's `compose.yaml` (merge into an existing `include` list):
+
+```yaml
+include:
+  - path: svc/whoami/compose.yaml
+```
+
+Create the container through the onboarding-selected `teyfix` Docker context:
+
+```sh
+docker --context teyfix compose up -d whoami
+```
+
+With the host's HTTP/domain defaults configured and one effective exposed TCP port, `auto=true` is the only required label. Port metadata comes from the image and container creation request, including Compose `expose`; `expose` does not publish a host port. The service must actually join `traefik_proxy`. The provider already selects that network, so no per-service `traefik.docker.network` label is needed. Do not publish backend host ports or attach applications to the ingress router's network.
+
+Expansion happens before container creation. Recreate an existing service through the proxy after changing labels; editing Compose alone does not update its labels. An explicit socket, `DOCKER_HOST` or another Docker context can bypass expansion. A normal application-only adoption does not require restarting the ingress bundle.
+
+```mermaid
+flowchart LR
+  C["Compose metadata + image ports + opt-in"] --> P["teyfix Docker context / expansion proxy"]
+  P --> N["Native Traefik labels on created container"]
+  N --> T["Traefik provider"] --> A["Application on traefik_proxy"]
+```
+
+### Names and explicit selections
+
+Discovery resolves each field separately: explicit Teyfix labels/configuration, image Teyfix labels, then Compose metadata, allowed identity environment variables, Git/worktree and bind-mount evidence, project networks, container/image names and configured defaults. Native Traefik policy remains authoritative. Linked Git worktrees use the canonical repository as the project and their checkout directory as the worktree name; this can differ from Compose's runtime project namespace. Without Compose or bind workspace evidence, the caller's current directory is unavailable and names fall back to image/container metadata.
+
+| Checkout | Hostname | Example for service `whoami`, project `example`, domain `tail.gg` |
+| --- | --- | --- |
+| Main | `{service}.{project}.{domain}` | `whoami.example.tail.gg` |
+| Named worktree `feature` | `{service}.{worktree}.{project}.{domain}` | `whoami.feature.example.tail.gg` |
+
+The same naming applies to HTTP and TLS/SNI TCP routes. The main checkout retains `main` internally; only the hostname omits it. Traefik's own hostname is `traefik.{domain}` and uses its native `api@internal` service.
+
+Zero or multiple exposed TCP ports require an explicit port. Select HTTP with:
+
+```yaml
+labels:
+  teyfix/traefik.http: "8080"
+```
+
+`teyfix/traefik.http.port: "8080"` is equivalent. Either selection opts in without `auto=true`. For TCP, select the protocol explicitly and use the host's existing listener/TLS policy, for example:
+
+```yaml
+labels:
+  teyfix/traefik.tcp: "5432"
+  teyfix/traefik.tcp.entrypoint: shared
+  teyfix/traefik.tcp.tls: "true"
+  traefik.tcp.routers.database.tls.certresolver: stepca
+```
+
+This targets the existing `shared` entrypoint (port `4040` in the default stack). The native certificate-resolver label retains certificate policy on the generated router; use distinct native router names for distinct services. Ports do not identify application protocols; a database's exposed `5432` alone does not select TCP. Clients must support the configured TLS/SNI route. `teyfix/traefik.auto: "false"` disables expansion even when route-selection labels are present.
+
+### Migrating native labels
+
+For a simple HTTP service using the default generated hostname, replace its repetitive native enable/router/TLS/service-port labels with `auto=true` and keep the network attachment. Retain an explicit port only when metadata cannot select it unambiguously. Project, service, worktree, domain and host labels can be omitted when discovery already resolves the intended values.
+
+Keep native labels for multiple hosts or routers, middleware chains, authentication, caching, Sablier and other application policy. Existing native labels remain supported and win over generated values; discovery does not require a per-project routing DSL or separate router YAML. Private services need no opt-in. Do not opt them in merely because a port is exposed.
+
+Use an explicit host only to preserve an intentional name that differs from the convention:
 
 ```yaml
 labels:
   teyfix/traefik.auto: "true"
-  teyfix/traefik.http: "8080"
+  teyfix/traefik.http.host: legacy.example.test
 ```
 
-Discovery fills project, service and worktree identity from available labels, Compose metadata, allowed environment variables, Git/worktree and mount evidence, then image/container metadata. Explicit values override inferred values. Application hostnames are `{service}.{project}.{domain}` for the main checkout and `{service}.{worktree}.{project}.{domain}` for other worktrees. Traefik itself resolves to `traefik.{domain}`.
+Before replacing a native route, check its current hostnames, backend port, networks and policy. Keep any setting that discovery does not reproduce, then verify the expected HTTPS/TCP path from an authorized client after recreation.
 
 ## Client trust
 
-Clients need access through the Tailnet and must trust this installation's root CA. Export only the public certificate with `task certs`, verify its fingerprint through a trusted channel, then register it in the client trust store. Linux/Windows trust and WSL2 support are implemented by `ingressctl trust`; run `.cache/traefik-bootstrap/bin/ingressctl trust install --help` on the client for flags. Never share CA private keys or another host's Tailscale identity.
+Clients need access through the Tailnet and must trust this installation's root CA. Export only the public certificate with `task certs`, verify its fingerprint through an independent authenticated channel, then register it in the client trust store. Linux/Windows trust and WSL2 support are implemented by `ingressctl trust`; run `.cache/traefik-bootstrap/bin/ingressctl trust install --help` on the client for flags. Obtain client helpers from the public release over already-trusted HTTPS. An optional private install page cannot establish first trust by itself. Server onboarding does not install client Tailscale or host/browser CA trust. Never share CA private keys or another host's Tailscale identity.
 
 ## Development
 
