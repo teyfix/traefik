@@ -240,8 +240,8 @@ describe("Local bundle entrypoint", () => {
 });
 
 describe("Public default onboarding", () => {
-  for (const failCopy of [false, true]) {
-    test(`retrieves the helper without private source and cleans its extraction container; copy failure=${failCopy}`, async () => {
+  for (const failure of [undefined, "create", "cp"]) {
+    test(`retrieves the helper without private source and cleans its extraction container; failure=${failure ?? "none"}`, async () => {
       const f = await fixture();
       await writeFile(
         join(f.root, "docker-compose.yaml"),
@@ -263,29 +263,30 @@ describe("Public default onboarding", () => {
                   join(f.installation, ".state/traefik/compose.env"),
                   'TS_INGRESS_SUBNET="10.90.0.0/24"\nTRAEFIK_IP="10.90.0.2"\n',
                 ).then(() => 0)
-              : Promise.resolve(failCopy && args[1] === "cp" ? 1 : 0),
+              : Promise.resolve(args[1] === failure ? 1 : 0),
           };
         }) as unknown as typeof Bun.spawn;
         const operation = runBundleOnboarding(
           ["--install-dir", f.installation],
           f.root,
         );
-        if (failCopy) await expect(operation).rejects.toThrow("status 1");
+        if (failure) await expect(operation).rejects.toThrow("status 1");
         else await operation;
-        expect(calls.slice(0, 4).map((c) => c.args[1])).toEqual([
-          "pull",
-          "create",
-          "cp",
-          "rm",
-        ]);
-        for (const call of calls.slice(0, 4)) {
+        const dockerCalls = calls.filter((c) => c.args[0] === "docker");
+        expect(dockerCalls.map((c) => c.args[1])).toEqual(
+          failure === "create"
+            ? ["pull", "create", "rm"]
+            : ["pull", "create", "cp", "rm"],
+        );
+        for (const call of dockerCalls) {
           expect(call.env?.TS_API_KEY).toBeUndefined();
           expect(call.env?.TS_API_TOKEN).toBeUndefined();
         }
-        expect(calls[2]!.args[2]).toEndWith(":/usr/local/bin/ingressctl");
-        expect(calls[3]!.args[2]).toBe(calls[1]!.args[3]!);
-        expect(existsSync(join(f.installation, ".env"))).toBe(!failCopy);
-        if (!failCopy) {
+        if (failure !== "create")
+          expect(calls[2]!.args[2]).toEndWith(":/usr/local/bin/ingressctl");
+        expect(dockerCalls.at(-1)!.args[2]).toBe(calls[1]!.args[3]!);
+        expect(existsSync(join(f.installation, ".env"))).toBe(!failure);
+        if (!failure) {
           expect(calls[4]!.args).toContain("onboarding");
           expect(calls[4]!.env?.TS_API_KEY).toBe("fixture-private-key");
           const deployment = await readFile(

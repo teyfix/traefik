@@ -242,20 +242,20 @@ export async function runBundleOnboarding(
     const env = composeSubprocessEnv();
     await run(["docker", "pull", image], installation, env);
     const container = `traefik-bootstrap-${randomUUID()}`;
-    await run(
-      [
-        "docker",
-        "create",
-        "--name",
-        container,
-        "--entrypoint",
-        "/bin/true",
-        image,
-      ],
-      installation,
-      env,
-    );
     try {
+      await run(
+        [
+          "docker",
+          "create",
+          "--name",
+          container,
+          "--entrypoint",
+          "/bin/true",
+          image,
+        ],
+        installation,
+        env,
+      );
       await run(
         [
           "docker",
