@@ -1,3 +1,8 @@
+---
+title: Shared local ingress, TLS, and tailnet DNS
+summary: Operate standalone Traefik, Step CA and Tailscale ingress and attach application projects with trusted HTTPS.
+---
+
 # Shared local ingress, TLS, and tailnet DNS
 
 This repository provides reusable development ingress for multiple projects:
@@ -60,6 +65,27 @@ from the environment that will use them; this repository does not supply
 workspace MCP settings.
 The stack setup below applies when you are operating an authorized ingress
 installation.
+
+### Local bundle preview
+
+The public quickstart below still uses the supported standalone stack. The single-container bundle has not been publicly released. Operators with access to its maintained source can explicitly preview it from this repository:
+
+```bash
+bun scripts/onboarding.ts --bundle-source /path/to/containers --domain dev.example.test
+```
+
+Replace the example suffix with the authorized location. This requires Linux or the WSL Docker-host distro, Bun, Docker Engine, Buildx and Compose. The wrapper builds the native helper and bundle using the selected source, then delegates key/location input, allocation and setup to Go. Source is mounted read-only for helper builds; installation state and build caches stay in this checkout. `--install-dir /path/to/installation` selects a different fresh installation root. Automation can supply `TS_API_KEY`, `TRAEFIK_INGRESS_DOMAIN` and `TRAEFIK_HOSTNAME` instead of prompts. The legacy `TRAEFIK_DOMAIN` means dashboard hostname and is not used as a bundle DNS suffix.
+
+```mermaid
+flowchart LR
+  S[Explicit local source preview] --> B[Build helper and bundle]
+  B --> G[Go onboarding]
+  G --> V{Verified setup?}
+  V -->|Yes| C[Select bundle for Compose commands]
+  V -->|No| P[Preserve state and previous selection]
+```
+
+`--dry-run` may prepare local build/cache files but does not activate the generated deployment; Go leaves Tailnet and host services unchanged. Existing ingress configuration or identity state requires the migration procedure rather than this fresh-install preview. The server setup does not install a host Tailscale client, host split-DNS resolver or client CA trust; browsing clients still need their Tailnet DNS path and the certificate trust setup below. Without `--bundle-source`, the standalone onboarding below remains the default. Public clone-and-run bundle onboarding still depends on matching public helper/image releases; access to a private catalog is not a requirement of the supported standalone distribution.
 
 ### 1. Clone the Repository
 
@@ -251,6 +277,51 @@ available. The alias defaults to `TRAEFIK_DOMAIN` and changes only this host's
 private Docker DNS; remote hosts continue to use their tailnet DNS. Keep the
 container off `traefik_ingress`, and verify the route with normal TLS from the
 calling container before changing its endpoint configuration.
+
+For several exact hostnames, use a native Compose override supplied by the
+project that owns those routes. That project can generate the alias list from
+its canonical enabled routes instead of copying hostnames into each consumer
+or this ingress repository. The override has this shape:
+
+```yaml
+services:
+  traefik:
+    networks:
+      proxy:
+        aliases:
+          - api.project.dev.example.test
+          - assets.project.dev.example.test
+```
+
+Set standard `COMPOSE_FILE` in this host's ignored `.env` to load the base and
+the supplied override (colon-separated on Linux):
+
+```dotenv
+COMPOSE_FILE="docker-compose.yaml:/absolute/path/to/routes.compose.yaml"
+```
+
+Compose appends these aliases to `traefik.docker.local` and
+`TRAEFIK_PROXY_ROUTE_ALIAS`; existing single-host configurations keep working.
+The supplied file must exist before rendering or starting the stack. After
+regenerating it, apply only the Traefik service from this repository root:
+
+```sh
+task check:ingress-config
+docker compose up -d --no-deps traefik
+```
+
+```mermaid
+flowchart LR
+  R["Route owner's enabled hostnames"] --> O["Generated Compose aliases"]
+  O --> T["Traefik on traefik_proxy"]
+  C["Consumer on traefik_proxy"] -->|"Docker DNS and trusted HTTPS"| T
+  T --> B["Route owner's backend"]
+```
+
+Docker DNS aliases do not distribute certificate trust. Mount only the exported
+public `certs/root_ca.crt` into consumers and configure their native trust store
+(for Bun, `NODE_EXTRA_CA_CERTS` pointing to that read-only mount). Verify normal
+HTTPS from the calling container after applying aliases.
 
 ## 🧪 Example: Secure PostgreSQL behind Traefik
 

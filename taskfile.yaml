@@ -7,11 +7,16 @@ tasks:
       - bun test
       - bun run check:agent-rules
   check:ingress-config:
-    desc: Renders Compose and validates distinct static ingress service addresses
+    desc: Validates the selected bundle or legacy ingress configuration
     cmds:
-      - bun scripts/check-ingress-config.ts
+      - |
+        if docker compose config --images | grep -Eq '^teyfix/traefik[:@]'; then
+          docker compose config --quiet
+        else
+          bun scripts/check-ingress-config.ts
+        fi
   onboard:
-    desc: Runs the idempotent Traefik/Tailscale onboarding CLI
+    desc: Runs standalone onboarding; --bundle-source PATH selects the local bundle preview
     cmds:
       - bun scripts/onboarding.ts {{.CLI_ARGS}}
   up:
@@ -37,9 +42,9 @@ tasks:
   certs:
     desc: Copies certs from container to host
     cmds:
-      - docker compose exec stepca sh -c "mkdir -p /tmp/exported && cp /home/step/certs/*.crt /tmp/exported"
+      - docker compose exec traefik sh -c "mkdir -p /tmp/exported && cp /home/step/certs/*.crt /tmp/exported"
       - mkdir -p certs
-      - docker compose cp stepca:/tmp/exported/. ./certs
+      - docker compose cp traefik:/tmp/exported/. ./certs
   certs:install:
     desc: Installs root_ca.crt to system trust store (Linux)
     vars:
