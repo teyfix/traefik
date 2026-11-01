@@ -22,11 +22,13 @@ jobs:
         run: bun run typecheck
       - name: Test rule limits and discovery
         run: bun test
+      - name: Validate default single-container model
+        run: docker compose --env-file .example.env -f docker-compose.yaml config --quiet
       - name: Validate rendered ingress addresses
-        run: bun scripts/check-ingress-config.ts --env-file .example.env
+        run: COMPOSE_FILE=docker-compose.legacy.yaml bun scripts/check-ingress-config.ts --env-file .example.env
       - name: Reject invalid rendered ingress addresses
-        run: bun scripts/check-ingress-invalid-configs.ts --env-file .example.env
+        run: COMPOSE_FILE=docker-compose.legacy.yaml bun scripts/check-ingress-invalid-configs.ts --env-file .example.env
       - name: Prove ingress addresses across recreation orders
-        run: bun scripts/check-ingress-restart-order.ts
+        run: COMPOSE_FILE=docker-compose.legacy.yaml bun scripts/check-ingress-restart-order.ts
       - name: Check current agent rules
         run: bun run check:agent-rules

@@ -16,7 +16,7 @@ tasks:
           bun scripts/check-ingress-config.ts
         fi
   onboard:
-    desc: Runs standalone onboarding; --bundle-source PATH selects the local bundle preview
+    desc: Sets up shared ingress; prompts for the Tailscale API key and location
     cmds:
       - bun scripts/onboarding.ts {{.CLI_ARGS}}
   up:

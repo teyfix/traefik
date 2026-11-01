@@ -1,17 +1,53 @@
 name: traefik
-
-include:
-  - compose/edge/docker-compose.yaml
-  - compose/tailscale/docker-compose.yaml
-  - compose/observability/docker-compose.yaml
-
+services:
+  traefik:
+    image: teyfix/traefik:0.1.0-build.8
+    cpus: 2
+    mem_limit: 1g
+    restart: unless-stopped
+    labels:
+      teyfix/traefik.http: "80"
+    environment:
+      TEYFIX_TRUST_ENABLED: ${TEYFIX_TRUST_ENABLED:-false}
+      TEYFIX_DOZZLE_ENABLED: ${TEYFIX_DOZZLE_ENABLED:-false}
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:4040:4040"
+    volumes:
+      - type: bind
+        source: ${PWD}/traefik.yaml
+        target: /config/traefik.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PWD}/.state/traefik/auth-key
+        target: /run/secrets/tailscale-auth-key
+        read_only: true
+        bind:
+          create_host_path: false
+      - ${PWD}/.state/stepca/data:/home/step
+      - ${PWD}/.state/tailscale/data:/var/lib/tailscale
+      - ${PWD}/.state/traefik/acme:/acme
+      - ${PWD}/.cache/traefik/runtime:/var/cache/teyfix-traefik
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      ingress:
+        ipv4_address: ${TRAEFIK_IP:?Run ingressctl onboarding first}
+      proxy: {}
 networks:
-  proxy:
-    name: traefik_proxy
-    driver: bridge
   ingress:
     name: traefik_ingress
-    driver: bridge
     ipam:
       config:
-        - subnet: ${TS_INGRESS_SUBNET:?}
+        - subnet: ${TS_INGRESS_SUBNET:?Run ingressctl onboarding first}
+  proxy:
+    name: traefik_proxy

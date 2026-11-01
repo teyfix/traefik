@@ -1,0 +1,17 @@
+name: traefik
+
+include:
+  - compose/edge/docker-compose.yaml
+  - compose/tailscale/docker-compose.yaml
+  - compose/observability/docker-compose.yaml
+
+networks:
+  proxy:
+    name: traefik_proxy
+    driver: bridge
+  ingress:
+    name: traefik_ingress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${TS_INGRESS_SUBNET:?}

@@ -19,12 +19,12 @@ private catalog cannot become a required dependency. Apply the shared
 
 When the user explicitly asks to start or resume onboarding, read
 `.agents/rules/onboarding.md` and the
-[onboarding questionnaire](compose/tailscale/ONBOARDING.md). Do not load them
+[default onboarding](README.md#set-up-a-host). Do not load them
 or check an onboarding file during ordinary sessions. Missing onboarding
 inputs never block unrelated work.
 
 For assigned infrastructure work, read [README.md](README.md) and the
-[Tailscale operator guide](compose/tailscale/README.md) for the current design.
+[legacy Tailscale operator guide](compose/tailscale/README.md) only when working on an existing split-container installation. The default is the bundled single-container stack in `docker-compose.yaml`; users do not select an image or supply a Containers checkout.
 
 Keep `AGENTS.md` and every Markdown file under `.agents/rules/` at most 12,000
 Unicode code points, including frontmatter. Move procedural detail to linked

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { composeSubprocessEnv } from "./compose";
@@ -36,11 +37,6 @@ export function bundleOptions(args: string[]): {
     const key = option === "--bundle-source" ? "source" : "installation";
     if (result[key]) throw new Error(`${option} was supplied more than once.`);
     result[key] = value;
-  }
-  if (result.installation && !result.source) {
-    throw new Error(
-      "--install-dir requires --bundle-source for the local bundle preview.",
-    );
   }
   return result;
 }
@@ -82,14 +78,12 @@ async function run(
   }
 }
 
-/** Local source preview only: public helper/image downloads are not released yet. */
+/** Public onboarding; --bundle-source builds a development override. */
 export async function runBundleOnboarding(
   args: string[],
   repositoryRoot: string,
 ): Promise<void> {
   const options = bundleOptions(args);
-  if (!options.source)
-    throw new Error("Bundle onboarding requires --bundle-source.");
   if (
     process.platform !== "linux" ||
     !["x64", "arm64"].includes(process.arch)
@@ -103,22 +97,29 @@ export async function runBundleOnboarding(
     options.forwarded.includes("-h")
   ) {
     console.log(
-      "Local bundle preview: bun scripts/onboarding.ts --bundle-source PATH [--install-dir PATH] [--domain SUFFIX] [--hostname NAME] [--dry-run] [--skip-proxy-setup]\nRequires Docker Engine, Buildx and Compose. Missing key/location are prompted by ingressctl. No public bundle release is available yet.",
+      "Usage: bun scripts/onboarding.ts [--install-dir PATH] [--domain SUFFIX] [--hostname NAME] [--dry-run] [--skip-proxy-setup]\nRequires Docker Engine and Compose. Missing Tailscale key and location are prompted automatically. Development only: --bundle-source PATH builds from source with Buildx.",
     );
     return;
   }
-  const source = resolve(options.source);
+  const source = options.source ? resolve(options.source) : undefined;
   const installation = resolve(options.installation ?? repositoryRoot);
-  const helperCompose = join(source, "svc/traefik/helper/compose.yaml");
-  const example = join(source, "svc/traefik/example/compose.yaml");
-  for (const file of [
-    helperCompose,
-    example,
-    join(source, "docker-bake.hcl"),
-    join(source, "svc/traefik/helper/go.mod"),
-  ]) {
+  const helperCompose = source
+    ? join(source, "svc/traefik/helper/compose.yaml")
+    : undefined;
+  const example = source
+    ? join(source, "svc/traefik/example/compose.yaml")
+    : join(repositoryRoot, "docker-compose.yaml");
+  const requiredFiles = source
+    ? [
+        helperCompose!,
+        example,
+        join(source, "docker-bake.hcl"),
+        join(source, "svc/traefik/helper/go.mod"),
+      ]
+    : [example];
+  for (const file of requiredFiles) {
     if (!existsSync(file))
-      throw new Error(`Bundle source is incomplete: ${file}`);
+      throw new Error(`Installation source is incomplete: ${file}`);
   }
   const state = join(installation, ".state/traefik");
   const marker = join(state, "bootstrap.json");
@@ -132,7 +133,7 @@ export async function runBundleOnboarding(
     ].some((path) => existsSync(join(installation, path)))
   ) {
     throw new Error(
-      "Existing ingress configuration/state found. Use the state-preserving migration procedure; this preview bootstraps fresh installations.",
+      "Existing ingress configuration/state found. Use the state-preserving migration procedure; onboarding bootstraps fresh installations.",
     );
   }
   if (existsSync(marker)) {
@@ -157,74 +158,118 @@ export async function runBundleOnboarding(
   const goCache = join(cache, "go");
   for (const directory of [state, binaries, goCache])
     await mkdir(directory, { recursive: true, mode: 0o700 });
-  const overrides = join(cache, "helper.compose.yaml");
-  const bind = (host: string, target: string, readOnly = false) => ({
-    type: "bind",
-    source: host,
-    target,
-    read_only: readOnly,
-  });
-  await writeFile(
-    overrides,
-    JSON.stringify({
-      services: {
-        check: {
-          volumes: [
-            bind(source, "/workspace", true),
-            bind(goCache, "/cache"),
-            bind(binaries, "/out"),
-          ],
-        },
-      },
-    }),
-    { mode: 0o600 },
-  );
-  const buildEnv = {
-    ...composeSubprocessEnv(),
-    PWD: source,
-    PLATFORMS: `linux/${process.arch === "x64" ? "amd64" : "arm64"}`,
-  };
-  await run(
-    [
-      "docker",
-      "compose",
-      "-f",
-      helperCompose,
-      "-f",
+  let image: string;
+  if (source) {
+    const overrides = join(cache, "helper.compose.yaml");
+    const bind = (host: string, target: string, readOnly = false) => ({
+      type: "bind",
+      source: host,
+      target,
+      read_only: readOnly,
+    });
+    await writeFile(
       overrides,
-      "run",
-      "--rm",
-      "--no-deps",
-      "check",
-      "env",
-      "CGO_ENABLED=0",
-      "go",
-      "build",
-      "-trimpath",
-      "-buildvcs=false",
-      "-o",
-      "/out/ingressctl",
-      "./cmd/ingressctl",
-    ],
-    source,
-    buildEnv,
-  );
-  const image = "teyfix/traefik:local-bootstrap";
-  await run(
-    [
-      "docker",
-      "buildx",
-      "bake",
-      "-f",
-      join(source, "docker-bake.hcl"),
-      "traefik",
-      "--load",
-      "--set",
-      `traefik.tags=${image}`,
-    ],
-    source,
-    buildEnv,
-  );
+      JSON.stringify({
+        services: {
+          check: {
+            volumes: [
+              bind(source, "/workspace", true),
+              bind(goCache, "/cache"),
+              bind(binaries, "/out"),
+            ],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const buildEnv = {
+      ...composeSubprocessEnv(),
+      PWD: source,
+      PLATFORMS: `linux/${process.arch === "x64" ? "amd64" : "arm64"}`,
+    };
+    await run(
+      [
+        "docker",
+        "compose",
+        "-f",
+        helperCompose!,
+        "-f",
+        overrides,
+        "run",
+        "--rm",
+        "--no-deps",
+        "check",
+        "env",
+        "CGO_ENABLED=0",
+        "go",
+        "build",
+        "-trimpath",
+        "-buildvcs=false",
+        "-o",
+        "/out/ingressctl",
+        "./cmd/ingressctl",
+      ],
+      source,
+      buildEnv,
+    );
+    image = "teyfix/traefik:local-bootstrap";
+    await run(
+      [
+        "docker",
+        "buildx",
+        "bake",
+        "-f",
+        join(source, "docker-bake.hcl"),
+        "traefik",
+        "--load",
+        "--set",
+        `traefik.tags=${image}`,
+      ],
+      source,
+      buildEnv,
+    );
+  } else {
+    const reference = Bun.YAML.parse(await readFile(example, "utf8")) as {
+      services?: { traefik?: { image?: string } };
+    };
+    const published = reference.services?.traefik?.image;
+    if (!published || !published.startsWith("teyfix/traefik:")) {
+      throw new Error(
+        "Default Compose file must select the public Traefik release.",
+      );
+    }
+    image = published;
+    const env = composeSubprocessEnv();
+    await run(["docker", "pull", image], installation, env);
+    const container = `traefik-bootstrap-${randomUUID()}`;
+    await run(
+      [
+        "docker",
+        "create",
+        "--name",
+        container,
+        "--entrypoint",
+        "/bin/true",
+        image,
+      ],
+      installation,
+      env,
+    );
+    try {
+      await run(
+        [
+          "docker",
+          "cp",
+          `${container}:/usr/local/bin/ingressctl`,
+          join(binaries, "ingressctl"),
+        ],
+        installation,
+        env,
+      );
+    } finally {
+      await run(["docker", "rm", container], installation, env);
+    }
+  }
   const compose = Bun.YAML.parse(await readFile(example, "utf8")) as {
     name?: string;
     services?: { traefik?: { image?: string } };

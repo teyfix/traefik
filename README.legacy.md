@@ -1,0 +1,523 @@
+---
+title: Legacy split-container ingress
+summary: Reference for existing split-container installations; new installations use README.md.
+---
+
+# Legacy split-container ingress
+
+This reference applies only to existing split-container deployments. New installations use [the default onboarding](README.md). Select this model explicitly with `COMPOSE_FILE=docker-compose.legacy.yaml`; do not apply it to a bundled installation.
+
+This repository provides reusable development ingress for multiple projects:
+
+- [Traefik](https://traefik.io/) reverse proxying on the shared
+  `traefik_proxy` Docker network
+- [Smallstep Step CA](https://smallstep.com/docs/step-ca/) certificates issued
+  to Traefik through ACME
+- a persistent Tailscale subnet router and CoreDNS split DNS for an
+  administrator-approved private suffix
+- private service names routed through the shared Traefik ingress
+- optional, self-contained service recipes
+
+Projects keep ownership of their application containers and Traefik labels.
+This stack owns the cross-project edge, certificate authority, DNS server, and
+Tailscale connector.
+
+![Traefik HTTP Routers](images/00-https-routers.png)
+
+## 🔧 Project Structure
+
+- `docker-compose.legacy.yaml`: legacy Compose model and stable shared networks
+- `compose/edge/`: Step CA and Traefik
+- `compose/tailscale/`: Tailscale connector, CoreDNS, and its operator guide
+- `compose/observability/`: shared operational tooling such as Dozzle
+- `traefik/traefik-static.yaml`: Static Traefik configuration with ACME resolver
+- `taskfile.yaml`: CLI automation with [`task`](https://taskfile.dev)
+- `certs/`: Extracted TLS certificates, including the root CA
+- `recipes/`: optional examples that are not included in the central stack
+
+> [!NOTE]  
+> Step CA uses `network_mode: host` so ACME challenges follow the host's
+> Tailscale split DNS and advertised Docker routes. Traefik connects to the CA
+> via `host.docker.internal` for certificate requests.
+
+---
+
+## Existing installation operations
+
+New installations use [default onboarding](README.md#set-up-a-host). Do not run that fresh-install flow against legacy CA/router state. These instructions describe the explicit split-container model only; use `COMPOSE_FILE=docker-compose.legacy.yaml` for every operation below.
+
+### Manual legacy configuration
+
+If preferred, you can complete the [onboarding questionnaire](compose/tailscale/ONBOARDING.md)
+with the current Tailnet administrator and configure `.env` manually:
+
+```bash
+cp .example.env .env
+$EDITOR .env
+```
+
+Complete the tailnet policy, route-approval, DNS, and reusable ephemeral key
+setup in [`compose/tailscale/README.md`](compose/tailscale/README.md). Store the
+key only in `env/.env.tailscale.local` with mode `0600`, never in `.env`. Keep
+`TRAEFIK_IP`, `TS_TAILSCALE_IP`, and `TS_DNS_SERVER` distinct and inside
+`TS_INGRESS_SUBNET`; `task check:ingress-config` validates the rendered model.
+
+### Existing checkout migration
+
+When upgrading an existing checkout to the ingress-only architecture:
+
+1. **Clean up legacy networks and containers**: If upgrading a host with active containers on the legacy `tailscale_services` network, remove task-owned containers directly by exact name, tolerating containers that are already absent, and then remove the legacy network:
+
+   ```bash
+   docker rm -f traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm tailscale_services
+   ```
+
+   If recreating an existing `traefik_ingress` network:
+
+   ```bash
+   docker rm -f traefik traefik_tailscale traefik_coredns 2>/dev/null || true
+   docker network rm traefik_ingress
+   ```
+
+   Direct `docker rm -f` of exact container names avoids `docker compose` parsing failures when legacy `.env` files lack `TRAEFIK_IP`. These commands remove only the named legacy or conflicting network; they preserve persistent state and unrelated networks such as `traefik_proxy`.
+
+2. **Migrate network ownership labels safely**: The CLI detects matching
+   `traefik_ingress` or `traefik_proxy` networks created by older direct Docker
+   commands. It removes only inactive unlabeled networks so Compose can recreate
+   them with ownership labels. If either has attachments, it stops with targeted
+   inspection/migration instructions; it does not delete backend containers,
+   volumes, or an active proxy network.
+
+3. **Migrate credentials**: The CLI removes legacy `TS_AUTHKEY` and
+   `TS_API_TOKEN` values from root `.env`, then atomically creates or sanitizes
+   `env/.env.tailscale.local`. It never stores the API token.
+
+   The current `teyfix-router` identity is confirmed ephemeral. The CLI still
+   requires the Tailnet API to explicitly report `isEphemeral: true` before
+   accepting the router or publishing split DNS; false or missing status stops
+   a normal run while preserving existing split DNS, and is reported as a
+   nonfatal prerequisite by `--dry-run`. Do not reset router state during an
+   ordinary migration. The
+   [operator guide](compose/tailscale/README.md#existing-teyfix-router-identity)
+   records the identity guard and contingency procedure.
+
+4. **Preserve local `.env`**: If migrating from very old checkouts that tracked root `.env`:
+   ```bash
+   mkdir -p .local
+   cp --backup=numbered .env .local/.env.before-example-env-migration
+   ```
+   After updating, restore if Git removed it:
+   ```bash
+   test -f .env || cp .local/.env.before-example-env-migration .env
+   task check:ingress-config
+   ```
+
+### 3. Render and start the environment
+
+```bash
+task check:ingress-config
+docker compose up -d
+```
+
+This will:
+
+- Start Step CA, Traefik, Tailscale, CoreDNS, and observability services
+- Wait until Step CA is healthy
+- Allow Traefik to request certificates using ACME
+- Create stable external networks for application projects
+
+The equivalent Task command is `task up`. Complete the tailnet administration
+and local auth-key setup before the first start so Tailscale can register.
+
+### 4. Trust the root CA (Linux)
+
+```bash
+task certs:install
+```
+
+This will:
+
+- Copy `root_ca.crt` from the Step CA container
+- Install it to your system trust store via `update-ca-certificates`
+
+✅ Works for WSL, Debian, Ubuntu, etc.
+
+> [!TIP]  
+> You can use `/usr/local/share/ca-certificates/traefik-stepca-root-ca.crt` as
+> the root certificate for apps that do not use the system trust store.
+
+### 5. Trust the Root CA (Windows)
+
+To make Windows trust the locally issued TLS certificates:
+
+```sh
+task certs
+explorer.exe certs
+```
+
+Then follow these steps to install the certificate:
+
+1. In the opened folder, double-click the file named `root_ca.crt`.
+2. A security warning will appear — click **"Open"**.
+3. The certificate viewer will open. Click **"Install Certificate..."**.
+4. Choose **"Local Machine"** (this requires administrator privileges), then
+   click **Next**.
+5. Select **"Place all certificates in the following store"**, then click
+   **Browse**.
+6. Choose **"Trusted Root Certification Authorities"**, then click **OK**.
+7. Click **Next**, then **Finish**.
+8. A final prompt will confirm the installation — click **Yes**.
+
+> 🛡️ You should now be able to visit services like
+> your configured Traefik hostname in your browser without any certificate
+> warnings.
+
+### 6. Attach an application project
+
+Attach application services exclusively to `traefik_proxy` and declare standard
+project-owned Traefik labels. A host such as
+`api.project.dev.example.test` resolves to Traefik's static IP (`TRAEFIK_IP`) on
+the routed `traefik_ingress` network, and Traefik forwards traffic to the backend
+on `traefik_proxy`.
+
+Under the ingress-only architecture, application backends remain isolated on the
+private, unadvertised `traefik_proxy` network. Direct container exposure, direct
+DNS zones, and direct routes (such as `tailscale_services` or `DIRECT_DOMAIN`)
+are eliminated; all traffic enters through Traefik for centralized TLS termination,
+routing, and access control.
+
+A container on the same host that must call one of Traefik's HTTPS routes can join
+`traefik_proxy` and set `TRAEFIK_PROXY_ROUTE_ALIAS` in this host's ignored `.env`
+to that route's exact hostname. Docker DNS then resolves that name to Traefik's
+proxy-network interface. The existing `traefik.docker.local` alias remains
+available. The alias defaults to `TRAEFIK_DOMAIN` and changes only this host's
+private Docker DNS; remote hosts continue to use their tailnet DNS. Keep the
+container off `traefik_ingress`, and verify the route with normal TLS from the
+calling container before changing its endpoint configuration.
+
+For several exact hostnames, use a native Compose override supplied by the
+project that owns those routes. That project can generate the alias list from
+its canonical enabled routes instead of copying hostnames into each consumer
+or this ingress repository. The override has this shape:
+
+```yaml
+services:
+  traefik:
+    networks:
+      proxy:
+        aliases:
+          - api.project.dev.example.test
+          - assets.project.dev.example.test
+```
+
+Set standard `COMPOSE_FILE` in this host's ignored `.env` to load the base and
+the supplied override (colon-separated on Linux):
+
+```dotenv
+COMPOSE_FILE="docker-compose.legacy.yaml:/absolute/path/to/routes.compose.yaml"
+```
+
+Compose appends these aliases to `traefik.docker.local` and
+`TRAEFIK_PROXY_ROUTE_ALIAS`; existing single-host configurations keep working.
+The supplied file must exist before rendering or starting the stack. After
+regenerating it, apply only the Traefik service from this repository root:
+
+```sh
+task check:ingress-config
+docker compose up -d --no-deps traefik
+```
+
+```mermaid
+flowchart LR
+  R["Route owner's enabled hostnames"] --> O["Generated Compose aliases"]
+  O --> T["Traefik on traefik_proxy"]
+  C["Consumer on traefik_proxy"] -->|"Docker DNS and trusted HTTPS"| T
+  T --> B["Route owner's backend"]
+```
+
+Docker DNS aliases do not distribute certificate trust. Mount only the exported
+public `certs/root_ca.crt` into consumers and configure their native trust store
+(for Bun, `NODE_EXTRA_CA_CERTS` pointing to that read-only mount). Verify normal
+HTTPS from the calling container after applying aliases.
+
+## 🧪 Example: Secure PostgreSQL behind Traefik
+
+You can run services like PostgreSQL behind Traefik using TCP with TLS
+termination:
+
+```yaml
+networks:
+  traefik_proxy:
+    name: traefik_proxy
+    external: true
+
+services:
+  postgres:
+    image: teyfix/timescaledb-pgrx:latest
+    labels:
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.project_pg.rule=HostSNI(`pg.project.dev.example.test`)"
+      - "traefik.tcp.routers.project_pg.entrypoints=shared"
+      - "traefik.tcp.routers.project_pg.service=project_pg"
+      - "traefik.tcp.routers.project_pg.tls=true"
+      - "traefik.tcp.routers.project_pg.tls.certresolver=stepca"
+      - "traefik.tcp.services.project_pg.loadbalancer.server.port=5432"
+    networks:
+      - traefik_proxy
+```
+
+You can now securely connect to PostgreSQL at
+`pg.project.dev.example.test:4040` with TLS.
+
+> [!NOTE]  
+> Port `4040` corresponds to the `shared` TCP entrypoint defined in Traefik's
+> configuration, which is designed for non-HTTP services like databases.
+
+## 🌐 Example: HTTP Service (MinIO) Behind Traefik
+
+You can also expose standard HTTP services like **MinIO** behind Traefik with
+HTTPS:
+
+```yaml
+networks:
+  traefik_proxy:
+    name: traefik_proxy
+    external: true
+
+services:
+  minio:
+    image: minio/minio:latest
+    environment:
+      # Prevents redirecting to the console when accessing the API directly
+      - MINIO_BROWSER_REDIRECT=false
+    expose:
+      - 9000 # API
+      - 9001 # Console
+    networks:
+      - traefik_proxy
+    labels:
+      - "traefik.enable=true"
+
+      # MinIO API
+      - "traefik.http.routers.project_minio_api.rule=Host(`minio-api.project.dev.example.test`)"
+      - "traefik.http.routers.project_minio_api.tls=true"
+      - "traefik.http.routers.project_minio_api.entrypoints=websecure"
+      - "traefik.http.routers.project_minio_api.tls.certresolver=stepca"
+      - "traefik.http.routers.project_minio_api.service=project_minio_api"
+      - "traefik.http.services.project_minio_api.loadbalancer.server.port=9000"
+
+      # MinIO Console
+      - "traefik.http.routers.project_minio_console.rule=Host(`minio-console.project.dev.example.test`)"
+      - "traefik.http.routers.project_minio_console.tls=true"
+      - "traefik.http.routers.project_minio_console.entrypoints=websecure"
+      - "traefik.http.routers.project_minio_console.tls.certresolver=stepca"
+      - "traefik.http.routers.project_minio_console.service=project_minio_console"
+      - "traefik.http.services.project_minio_console.loadbalancer.server.port=9001"
+```
+
+✅ Once running, you can securely access:
+
+- `https://minio-api.project.dev.example.test` for the API
+- `https://minio-console.project.dev.example.test` for the web console
+
+---
+
+## 🛠 Available Tasks
+
+| Task                     | Description                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| `task up`                | Start or recreate all services                                                       |
+| `task down`              | Stop all services while preserving persistent state                                  |
+| `task recreate`          | Recreate all services                                                                |
+| `task logs`              | Follow logs of all containers                                                        |
+| `task certs`             | Export certificates from Step CA                                                     |
+| `task certs:install`     | Install the root CA into your Linux trust store                                      |
+| `task purge`             | Stop all services and remove CA, ACME, and Tailscale state                           |
+| `task check:agent-rules` | Typecheck and test the agent-rule character-limit check, then validate this checkout |
+
+Repository rule checks need Bun 1.4.0 and `bun install --frozen-lockfile` once
+per checkout. `task check:agent-rules` runs the same checks as pull-request CI;
+without Task, run `bun run typecheck`, `bun test`, and
+`bun run check:agent-rules`. Each `AGENTS.md` and Markdown rule under
+`.agents/rules/` is limited to 12,000 Unicode code points, including
+frontmatter; nested rule directories are included. Procedural documentation
+can live in linked guides. These checks do not start services or require an
+another project checkout.
+
+---
+
+## 🌐 Traefik Dashboard
+
+Once up, you can access the Traefik dashboard via either:
+
+- **HTTPS (recommended)**: your configured Traefik hostname
+- **HTTP (insecure)**: `http://localhost:8080`
+
+> [!TIP]  
+> The HTTPS version uses certificates issued by your local Step CA, while the
+> HTTP version runs in insecure mode for development convenience.
+
+---
+
+## 🔐 Step CA Access
+
+If you need direct access to Step CA for advanced certificate management:
+
+```sh
+https://localhost:9000
+```
+
+> [!NOTE]  
+> Direct Step CA access is typically not needed for normal development
+> workflows, as Traefik handles certificate requests automatically via ACME.
+
+---
+
+## 📄 TLS Certificate Details
+
+- Root CA is generated by Step CA and used by Traefik's ACME resolver
+- Certificates are stored under `/home/step/certs/` in the `stepca` container
+- Traefik mounts these and uses them via `certResolver: stepca`
+
+---
+
+## 🌐 Network Architecture
+
+This stack exposes application services through a single ingress-only path:
+
+- Hostnames such as `api.project.dev.example.test` resolve through CoreDNS
+  at the configured `TS_DNS_SERVER` to Traefik's static ingress address
+  (`TRAEFIK_IP`) on `traefik_ingress`.
+- The Tailscale subnet router advertises solely the dedicated, explicit
+  ingress /24 subnet (`TS_INGRESS_SUBNET`) containing Tailscale, CoreDNS, and
+  Traefik. Its connector uses the static `TS_TAILSCALE_IP`; the other two
+  static addresses are `TS_DNS_SERVER` and `TRAEFIK_IP`.
+- Backend services attach exclusively to the private, unadvertised
+  `traefik_proxy` network. Traefik bridges incoming traffic from `traefik_ingress`
+  to backends on `traefik_proxy`. Direct container routes and direct-container DNS
+  (`DIRECT_DOMAIN`) are eliminated.
+
+Traefik publishes ports `80`, `443`, `8080`, and `4040` only on
+`127.0.0.1`. Host-local clients can still use those published ports, while
+ordinary LAN clients cannot reach them through a host interface. Tailnet
+clients instead reach Traefik's static IP through the approved
+ingress route. This boundary depends on restrictive Tailscale grants:
+private DNS names are service discovery, not authorization.
+
+Certificate validation uses this configuration:
+
+- **Step CA** runs in `network_mode: host` to use the host's tailnet split DNS
+  and advertised routes during ACME challenges
+- **Traefik** connects to Step CA via `host.docker.internal:9000` for
+  certificate requests
+- **Services** run on the private `traefik_proxy` bridge network for proper
+  service discovery
+
+> [!IMPORTANT]  
+> Step CA must use host networking so ACME validation follows the same tailnet
+> DNS and routed Docker path as clients.
+
+The complete tailnet policy, split-DNS, route, ownership, and migration contract
+is documented in [`compose/tailscale/README.md`](compose/tailscale/README.md).
+
+---
+
+## 🛡 Security Notes
+
+- This setup is for local/dev use only
+- Certificates are **not publicly trusted**
+- Browsers may still show a warning unless root CA is manually trusted
+- Host-published Traefik ports are loopback-only; tailnet access uses the
+  routed Docker address and must be restricted with Tailscale grants
+- Private DNS records do not authorize access or replace application
+  authentication for sensitive services
+- All ingress traffic passes through Traefik; direct container bypass routes
+  and direct DNS zones are eliminated
+- Using a single dedicated ingress /24 avoids broad Docker subnet routing and
+  prevents CIDR collisions with client LAN, VPN, or Docker networks
+- Tailnet split DNS shadows public records under the same suffix
+
+Using an owned suffix provides stable OAuth callback names, but providers such
+as Google still require the configured domain, HTTPS rules, and redirect URI to
+match exactly. Some providers require public reachability or a publicly trusted
+certificate; trusting the private Step CA locally does not satisfy those checks.
+
+---
+
+## Local container storage
+
+The central stack uses gitignored bind mounts under the project root:
+
+| Host directory           | Container path       | Contents                                      |
+| ------------------------ | -------------------- | --------------------------------------------- |
+| `.state/stepca/data/`    | `/home/step`         | CA identity, keys, certificates, and database |
+| `.state/traefik/acme/`   | `/acme`              | ACME account and issued certificates          |
+| `.state/tailscale/data/` | `/var/lib/tailscale` | Router identity and daemon state              |
+
+These are runtime state, not reusable downloads or upstream response caches;
+none of the central services currently needs `.cache/`. Preserve these directories
+during ordinary restarts. The tracked `step/config/ca.json` remains the active CA
+configuration. New empty CA directories are owned by the image's `step` user
+before initialization. Host state must not be mounted into agents.
+
+Existing named-volume installations must stop all writers, copy `traefik_step`,
+`traefik_acme`, and `traefik_tailscale` to the corresponding directories above
+while preserving numeric ownership and permissions, and verify the copies before
+recreating the services. Remove only those old volumes after confirming that the
+replacement containers use the bind mounts. Do not start with empty directories
+when preserving an existing CA or Tailscale identity.
+
+## 🧼 Cleanup
+
+```bash
+task down
+```
+
+This stops the stack and removes orphan containers while preserving persistent
+Step CA, ACME, and Tailscale state. To deliberately delete that state, use
+`task purge` and confirm the destructive prompt. It uses `sudo` to remove only
+the three state directories listed above, leaving `.cache/` untouched.
+`docker compose down -v` alone does not delete bind-mounted state.
+
+---
+
+## 📦 Requirements
+
+- [Docker](https://www.docker.com/)
+- Docker Compose with support for top-level `include`
+- [Task](https://taskfile.dev)
+- Linux or WSL (for root CA trust automation)
+
+## Screenshots
+
+### Traefik
+
+#### Dashboard
+
+![Traefik Dashboard](images/05-traefik-dashboard.png)
+
+#### HTTP Routers
+
+![Traefik HTTP Routers](images/00-https-routers.png)
+
+#### TCP Routers
+
+> [!WARNING]  
+> This image is outdated and will be updated in the future.
+
+![Traefik TCP Routers](images/01-tcp-routers.png)
+
+### Services
+
+#### KeyCloak Dashboard
+
+![KeyCloak Dashboard](images/02-keycloak.png)
+
+#### RedPanda Console
+
+![RedPanda Console](images/03-redpanda-console.png)
+
+#### Dozzle
+
+![Dozzle](images/04-dozzle.png)

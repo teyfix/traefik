@@ -41,9 +41,10 @@ describe("Local bundle entrypoint", () => {
       forwarded: ["--domain", "dev.example.test"],
     });
     expect(() => bundleOptions(["--bundle-source"])).toThrow("requires a path");
-    expect(() => bundleOptions(["--install-dir", "/tmp"])).toThrow(
-      "requires --bundle-source",
-    );
+    expect(bundleOptions(["--install-dir", "/tmp"])).toEqual({
+      installation: "/tmp",
+      forwarded: [],
+    });
     expect(() =>
       bundleOptions(["--bundle-source", "/a", "--output=/unsafe"]),
     ).toThrow("managed");
@@ -236,4 +237,70 @@ describe("Local bundle entrypoint", () => {
       await rm(f.root, { recursive: true, force: true });
     }
   });
+});
+
+describe("Public default onboarding", () => {
+  for (const failCopy of [false, true]) {
+    test(`retrieves the helper without private source and cleans its extraction container; copy failure=${failCopy}`, async () => {
+      const f = await fixture();
+      await writeFile(
+        join(f.root, "docker-compose.yaml"),
+        "name: traefik\nservices:\n  traefik:\n    image: teyfix/traefik:edge\n    labels:\n      teyfix/traefik.http: '80'\n",
+      );
+      const originalSpawn = Bun.spawn;
+      const originalKey = process.env.TS_API_KEY;
+      const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [];
+      process.env.TS_API_KEY = "fixture-private-key";
+      try {
+        Bun.spawn = ((
+          args: string[],
+          options?: { env?: NodeJS.ProcessEnv },
+        ) => {
+          calls.push({ args, env: options?.env });
+          return {
+            exited: args.includes("onboarding")
+              ? writeFile(
+                  join(f.installation, ".state/traefik/compose.env"),
+                  'TS_INGRESS_SUBNET="10.90.0.0/24"\nTRAEFIK_IP="10.90.0.2"\n',
+                ).then(() => 0)
+              : Promise.resolve(failCopy && args[1] === "cp" ? 1 : 0),
+          };
+        }) as unknown as typeof Bun.spawn;
+        const operation = runBundleOnboarding(
+          ["--install-dir", f.installation],
+          f.root,
+        );
+        if (failCopy) await expect(operation).rejects.toThrow("status 1");
+        else await operation;
+        expect(calls.slice(0, 4).map((c) => c.args[1])).toEqual([
+          "pull",
+          "create",
+          "cp",
+          "rm",
+        ]);
+        for (const call of calls.slice(0, 4)) {
+          expect(call.env?.TS_API_KEY).toBeUndefined();
+          expect(call.env?.TS_API_TOKEN).toBeUndefined();
+        }
+        expect(calls[2]!.args[2]).toEndWith(":/usr/local/bin/ingressctl");
+        expect(calls[3]!.args[2]).toBe(calls[1]!.args[3]!);
+        expect(existsSync(join(f.installation, ".env"))).toBe(!failCopy);
+        if (!failCopy) {
+          expect(calls[4]!.args).toContain("onboarding");
+          expect(calls[4]!.env?.TS_API_KEY).toBe("fixture-private-key");
+          const deployment = await readFile(
+            join(f.installation, ".state/traefik/bundle.compose.yaml"),
+            "utf8",
+          );
+          expect(deployment).toContain("teyfix/traefik:edge");
+          expect(deployment).toContain("teyfix/traefik.http");
+        }
+      } finally {
+        Bun.spawn = originalSpawn;
+        if (originalKey === undefined) delete process.env.TS_API_KEY;
+        else process.env.TS_API_KEY = originalKey;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
 });

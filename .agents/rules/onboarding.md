@@ -1,17 +1,15 @@
 ---
-title: Standalone onboarding and bundle preview routing
-summary: Preserve authorized host state and route legacy standalone setup or the explicit local Go bundle preview.
+title: Bundled onboarding and legacy routing
+summary: Use public bundled onboarding by default and preserve authorized host state; legacy procedures apply only to existing split-container installations.
 trigger: manual
 description: Load only for an explicit request to start or resume onboarding for Traefik/Tailscale; collect assigned network inputs and preserve shared infrastructure.
 ---
 
 # Configure the selected installation
 
-The service/IP and enrollment procedures below describe the legacy standalone
-stack. For an explicitly selected [local bundle preview](../../README.md#local-bundle-preview),
-use that entrypoint and the maintained Go helper contracts rather than translating
-the bundle into the legacy three-address configuration. Shared authority,
-credential and identity-preservation requirements still apply.
+Default onboarding is `bun scripts/onboarding.ts`, documented in [README.md](../../README.md#set-up-a-host). It retrieves the public helper automatically and delegates key/location input and setup to Go. Users do not need an image reference or a Containers checkout. `--bundle-source` is an optional development override. Preserve existing identities and shared settings.
+
+The procedures below apply only to an explicitly selected legacy split-container installation (`COMPOSE_FILE=docker-compose.legacy.yaml`), not the default bundle. Do not translate the bundle into the legacy three-address model.
 
 Activate on "I want to start onboarding" or an explicit resume request.
 Read `compose/tailscale/ONBOARDING.md` only for that setup. Do not check for a
