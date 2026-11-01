@@ -61,7 +61,7 @@ labels:
   teyfix/traefik.http: "8080"
 ```
 
-Discovery fills project, service and worktree identity from available labels, Compose metadata, allowed environment variables, Git/worktree and mount evidence, then image/container metadata. Explicit values override inferred values. Application hostnames follow `{service}.{worktree}.{project}.{domain}`. Traefik itself resolves to `traefik.{domain}`.
+Discovery fills project, service and worktree identity from available labels, Compose metadata, allowed environment variables, Git/worktree and mount evidence, then image/container metadata. Explicit values override inferred values. Application hostnames are `{service}.{project}.{domain}` for the main checkout and `{service}.{worktree}.{project}.{domain}` for other worktrees. Traefik itself resolves to `traefik.{domain}`.
 
 ## Client trust
 
