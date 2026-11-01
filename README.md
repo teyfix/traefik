@@ -66,6 +66,27 @@ workspace MCP settings.
 The stack setup below applies when you are operating an authorized ingress
 installation.
 
+### Local bundle preview
+
+The public quickstart below still uses the supported standalone stack. The single-container bundle has not been publicly released. Operators with access to its maintained source can explicitly preview it from this repository:
+
+```bash
+bun scripts/onboarding.ts --bundle-source /path/to/containers --domain dev.example.test
+```
+
+Replace the example suffix with the authorized location. This requires Linux or the WSL Docker-host distro, Bun, Docker Engine, Buildx and Compose. The wrapper builds the native helper and bundle using the selected source, then delegates key/location input, allocation and setup to Go. Source is mounted read-only for helper builds; installation state and build caches stay in this checkout. `--install-dir /path/to/installation` selects a different fresh installation root.
+
+```mermaid
+flowchart LR
+  S[Explicit local source preview] --> B[Build helper and bundle]
+  B --> G[Go onboarding]
+  G --> V{Verified setup?}
+  V -->|Yes| C[Select bundle for Compose commands]
+  V -->|No| P[Preserve state and previous selection]
+```
+
+`--dry-run` may prepare local build/cache files but does not activate the generated deployment; Go leaves Tailnet and host services unchanged. Existing ingress configuration or identity state requires the migration procedure rather than this fresh-install preview. The server setup does not install a host Tailscale client, host split-DNS resolver or client CA trust; browsing clients still need their Tailnet DNS path and the certificate trust setup below. Without `--bundle-source`, the standalone onboarding below remains the default. Public clone-and-run bundle onboarding still depends on matching public helper/image releases; access to a private catalog is not a requirement of the supported standalone distribution.
+
 ### 1. Clone the Repository
 
 First, clone this repository to a local directory where you'll be running your

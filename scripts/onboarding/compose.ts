@@ -12,6 +12,7 @@ export function composeSubprocessEnv(
     ...process.env,
     ...envUpdates,
   };
+  delete env.TS_API_KEY;
   delete env.TS_API_TOKEN;
   return env;
 }

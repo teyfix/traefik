@@ -16,7 +16,7 @@ tasks:
           bun scripts/check-ingress-config.ts
         fi
   onboard:
-    desc: Runs the idempotent Traefik/Tailscale onboarding CLI
+    desc: Runs standalone onboarding; --bundle-source PATH selects the local bundle preview
     cmds:
       - bun scripts/onboarding.ts {{.CLI_ARGS}}
   up:

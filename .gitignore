@@ -7,3 +7,5 @@ stepca
 /node_modules/
 /.cache/
 /.state/
+
+/traefik.yaml

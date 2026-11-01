@@ -1,9 +1,17 @@
 ---
+title: Standalone onboarding and bundle preview routing
+summary: Preserve authorized host state and route legacy standalone setup or the explicit local Go bundle preview.
 trigger: manual
 description: Load only for an explicit request to start or resume onboarding for Traefik/Tailscale; collect assigned network inputs and preserve shared infrastructure.
 ---
 
 # Configure the selected installation
+
+The service/IP and enrollment procedures below describe the legacy standalone
+stack. For an explicitly selected [local bundle preview](../../README.md#local-bundle-preview),
+use that entrypoint and the maintained Go helper contracts rather than translating
+the bundle into the legacy three-address configuration. Shared authority,
+credential and identity-preservation requirements still apply.
 
 Activate on "I want to start onboarding" or an explicit resume request.
 Read `compose/tailscale/ONBOARDING.md` only for that setup. Do not check for a

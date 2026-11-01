@@ -118,6 +118,10 @@ Options:
   --dry-run                    Plan mutations without applying any changes
   -h, --help                   Show this help text
 
+Local single-container source preview (not a public artifact release):
+  bun scripts/onboarding.ts --bundle-source /path/to/containers [--install-dir PATH] [Go onboarding flags]
+  Missing key/location inputs are handled by the Go helper. Existing instances require migration.
+
 Authentication:
   TS_API_TOKEN is transiently read from the environment and is never persisted to disk.
   A tagged, preauthorized, reusable ephemeral key is stored in the gitignored
